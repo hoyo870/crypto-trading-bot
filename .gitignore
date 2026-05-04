@@ -12,3 +12,6 @@ venv/
 # models/*.pth
 !data/scalers/*.pkl
 .DS_Store
+
+# Signal log files
+signal_logs_*.txt
