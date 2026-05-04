@@ -8,6 +8,6 @@ venv/
 .env
 
 # Data & Models (대용량 파일 제외)
-data/*.csv
-models/*.pth
+# data/*.csv
+# models/*.pth
 !data/scalers/*.pkl
