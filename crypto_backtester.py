@@ -379,7 +379,8 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
     print(f"[INFO] 추론 완료 — {len(predictions):,}개 예측 ({time.time()-t_infer:.1f}초)")
     print(f"[INFO] 신호 조건: prob >= {threshold_prob:.2f}, TP={tp_pct*100:.2f}%, SL={sl_pct*100:.2f}%, horizon={horizon} bars")
 
-    signal_logs = []
+    long_signal_logs = []
+    short_signal_logs = []
     long_total = 0
     short_total = 0
     long_win = 0
@@ -462,7 +463,7 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
         bars_held = exit_idx - entry_idx
         exit_date = pd.to_datetime(test_dates[exit_idx])
 
-        signal_logs.append({
+        signal_log = {
             'entry_date': entry_date,
             'type': signal_type,
             'prob': signal_prob,
@@ -473,7 +474,12 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
             'exit_date': exit_date,
             'mfe_pct': mfe * 100,
             'mae_pct': mae * 100,
-        })
+        }
+        
+        if signal_type == 'Long':
+            long_signal_logs.append(signal_log)
+        else:
+            short_signal_logs.append(signal_log)
 
         if signal_type == 'Long':
             long_total += 1
@@ -484,7 +490,7 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
             if outcome == 'WIN':
                 short_win += 1
 
-    total_signals = len(signal_logs)
+    total_signals = len(long_signal_logs) + len(short_signal_logs)
     long_loss = long_total - long_win
     short_loss = short_total - short_win
     total_win = long_win + short_win
@@ -508,34 +514,44 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
         print("[INFO] 조건을 만족하는 신호가 없습니다. threshold_prob를 낮춰보세요.")
         return
 
-    # 신호 로그를 txt 파일로 저장
+    # 신호 로그를 포지션별로 분리해서 저장
     symbol = data_path.split('/')[-1].replace('_processed.csv', '')
-    log_filename = f"signal_logs_{symbol}.txt"
     
-    with open(log_filename, 'w', encoding='utf-8') as f:
-        f.write(f"신호 추적 로그 - {symbol}\n")
-        f.write(f"생성 일시: {pd.Timestamp.now()}\n")
-        f.write(f"신호 조건: prob >= {threshold_prob:.2f}, TP={tp_pct*100:.2f}%, SL={sl_pct*100:.2f}%, horizon={horizon} bars\n")
-        f.write(f"\n총 신호 {total_signals}건 | 적중률 {total_wr:.2f}%\n")
-        f.write(f"Long: {long_total}건 ({long_wr:.2f}%) | Short: {short_total}건 ({short_wr:.2f}%)\n")
-        f.write("\n" + "="*120 + "\n")
-        f.write("date                | type  | prob   | MFE%    | MAE%    | result | ret%    | bars | reason\n")
-        f.write("-"*120 + "\n")
+    def save_signal_log(signal_logs, position_type):
+        """신호 로그를 파일로 저장하는 헬퍼 함수"""
+        log_filename = f"signal_logs_{symbol}_{position_type.lower()}.txt"
         
-        for row in signal_logs:
-            f.write(
-                f"{row['entry_date']} | "
-                f"{row['type']:<5} | "
-                f"{row['prob']*100:>5.2f}% | "
-                f"{row['mfe_pct']:>+7.3f}% | "
-                f"{row['mae_pct']:>+7.3f}% | "
-                f"{row['outcome']:<6} | "
-                f"{row['ret_pct']:>+7.3f}% | "
-                f"{row['bars']:>4} | "
-                f"{row['reason']}\n"
-            )
+        if not signal_logs:
+            print(f"[INFO] {position_type} 신호가 없습니다.")
+            return
+        
+        wr = (sum(1 for log in signal_logs if log['outcome'] == 'WIN') / len(signal_logs) * 100) if signal_logs else 0.0
+        
+        with open(log_filename, 'w', encoding='utf-8') as f:
+            f.write(f"신호 추적 로그 - {symbol} ({position_type})\n")
+            f.write(f"생성 일시: {pd.Timestamp.now()}\n")
+            f.write(f"신호 조건: prob >= {threshold_prob:.2f}, TP={tp_pct*100:.2f}%, SL={sl_pct*100:.2f}%, horizon={horizon} bars\n")
+            f.write(f"\n총 신호 {len(signal_logs)}건 | 적중률 {wr:.2f}%\n")
+            f.write("\n" + "="*120 + "\n")
+            f.write("date                | prob   | MFE%    | MAE%    | result | ret%    | bars | reason\n")
+            f.write("-"*120 + "\n")
+            
+            for row in signal_logs:
+                f.write(
+                    f"{row['entry_date']} | "
+                    f"{row['prob']*100:>5.2f}% | "
+                    f"{row['mfe_pct']:>+7.3f}% | "
+                    f"{row['mae_pct']:>+7.3f}% | "
+                    f"{row['outcome']:<6} | "
+                    f"{row['ret_pct']:>+7.3f}% | "
+                    f"{row['bars']:>4} | "
+                    f"{row['reason']}\n"
+                )
+        
+        print(f"[INFO] ✅ {position_type} 신호 로그 저장 완료: {log_filename} ({len(signal_logs)}건)")
     
-    print(f"[INFO] ✅ 신호 로그 저장 완료: {log_filename} ({total_signals}건)")
+    save_signal_log(long_signal_logs, 'Long')
+    save_signal_log(short_signal_logs, 'Short')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Crypto backtest / signal tracker runner")
