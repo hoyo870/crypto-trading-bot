@@ -288,7 +288,7 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
 
 def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.35,
                        batch_size=512, tp_pct=0.015, sl_pct=-0.005,
-                       horizon=72, max_log_lines=80, exclude_timeout_sample=True):
+                       horizon=72):
     """
     실제 매매 없이 모델 신호의 승/패만 추적하는 리포트 모드.
     - 신호 발생 조건: long_prob 또는 short_prob >= threshold_prob
@@ -491,25 +491,32 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
         print("[INFO] 조건을 만족하는 신호가 없습니다. threshold_prob를 낮춰보세요.")
         return
 
-    sample_logs = signal_logs
-    if exclude_timeout_sample:
-        sample_logs = [r for r in signal_logs if not str(r['reason']).startswith('시간종료')]
-        filtered_count = len(signal_logs) - len(sample_logs)
-        print(f"[INFO] 시간종료 샘플 필터 적용: {filtered_count}건 제외")
-
-    print(f"\n[INFO] 신호 로그 샘플 (최대 {max_log_lines}건)")
-    print("date                | type  | prob   | result | ret%    | bars | reason")
-    print("------------------------------------------------------------------------")
-    for row in sample_logs[:max_log_lines]:
-        print(
-            f"{row['entry_date']} | "
-            f"{row['type']:<5} | "
-            f"{row['prob']*100:>5.2f}% | "
-            f"{row['outcome']:<6} | "
-            f"{row['ret_pct']:>+7.3f}% | "
-            f"{row['bars']:>4} | "
-            f"{row['reason']}"
-        )
+    # 신호 로그를 txt 파일로 저장
+    symbol = data_path.split('/')[-1].replace('_processed.csv', '')
+    log_filename = f"signal_logs_{symbol}.txt"
+    
+    with open(log_filename, 'w', encoding='utf-8') as f:
+        f.write(f"신호 추적 로그 - {symbol}\n")
+        f.write(f"생성 일시: {pd.Timestamp.now()}\n")
+        f.write(f"신호 조건: prob >= {threshold_prob:.2f}, TP={tp_pct*100:.2f}%, SL={sl_pct*100:.2f}%, horizon={horizon} bars\n")
+        f.write(f"\n총 신호 {total_signals}건 | 적중률 {total_wr:.2f}%\n")
+        f.write(f"Long: {long_total}건 ({long_wr:.2f}%) | Short: {short_total}건 ({short_wr:.2f}%)\n")
+        f.write("\n" + "="*90 + "\n")
+        f.write("date                | type  | prob   | result | ret%    | bars | reason\n")
+        f.write("-"*90 + "\n")
+        
+        for row in signal_logs:
+            f.write(
+                f"{row['entry_date']} | "
+                f"{row['type']:<5} | "
+                f"{row['prob']*100:>5.2f}% | "
+                f"{row['outcome']:<6} | "
+                f"{row['ret_pct']:>+7.3f}% | "
+                f"{row['bars']:>4} | "
+                f"{row['reason']}\n"
+            )
+    
+    print(f"[INFO] ✅ 신호 로그 저장 완료: {log_filename} ({total_signals}건)")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Crypto backtest / signal tracker runner")
@@ -525,9 +532,6 @@ if __name__ == "__main__":
                         help="Stop loss ratio. e.g. -0.015 = -1.5%")
     parser.add_argument("--horizon", type=int, default=72,
                         help="Maximum holding bars / signal evaluation horizon")
-    parser.add_argument("--max-log-lines", type=int, default=80)
-    parser.add_argument("--keep-timeout-sample", action="store_true",
-                        help="Keep '시간종료' rows in signal sample log (default: excluded)")
     args = parser.parse_args()
 
     if args.mode in ["backtest", "both"]:
@@ -554,6 +558,4 @@ if __name__ == "__main__":
             tp_pct=args.tp_pct,
             sl_pct=args.sl_pct,
             horizon=args.horizon,
-            max_log_lines=args.max_log_lines,
-            exclude_timeout_sample=not args.keep_timeout_sample,
         )
