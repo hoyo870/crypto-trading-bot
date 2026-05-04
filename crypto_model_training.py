@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from copy import deepcopy
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, f1_score
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -24,26 +24,19 @@ class CryptoTimeSeriesDataset(Dataset):
         y = self.targets[idx + self.seq_length]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
 
-# 2. 🌟 [핵심] 3개의 브랜치로 나뉜 멀티 인풋 신경망 🌟
+# 2. 멀티 브랜치 신경망
 class MultiBranchCryptoPredictor(nn.Module):
     def __init__(self, num_indicators, hidden_price=64, hidden_vol=32, hidden_ind=64, dropout=0.3):
         super(MultiBranchCryptoPredictor, self).__init__()
         
-        # 전문가 1: 가격(OHLC) 담당 (입력 4개)
         self.lstm_price = nn.LSTM(4, hidden_price, num_layers=2, batch_first=True, dropout=dropout)
-        
-        # 전문가 2: 거래량 담당 (입력 1개)
         self.lstm_vol = nn.LSTM(1, hidden_vol, num_layers=2, batch_first=True, dropout=dropout)
-        
-        # 전문가 3: 보조지표 담당 (입력 num_indicators 개)
         self.lstm_ind = nn.LSTM(num_indicators, hidden_ind, num_layers=2, batch_first=True, dropout=dropout)
 
-        # Batch Normalization으로 각 전문가의 의견 크기를 규격화
         self.bn_price = nn.BatchNorm1d(hidden_price)
         self.bn_vol = nn.BatchNorm1d(hidden_vol)
         self.bn_ind = nn.BatchNorm1d(hidden_ind)
 
-        # 최종 결정권자 (Meta-Learner): 세 전문가의 의견을 합산하여 3진 분류(Hold, Long, Short)
         combined_size = hidden_price + hidden_vol + hidden_ind
         self.meta_learner = nn.Sequential(
             nn.Linear(combined_size, 128),
@@ -53,16 +46,14 @@ class MultiBranchCryptoPredictor(nn.Module):
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(64, 3) # 최종 출력: 0(관망), 1(롱), 2(숏)
+            nn.Linear(64, 3) 
         )
 
     def forward(self, x):
-        # 들어온 데이터를 특성별로 찢어줍니다. (prepare_data 함수에서 순서를 맞춰두었음)
-        x_price = x[:, :, 0:4]   # 인덱스 0~3: open, high, low, close
-        x_vol   = x[:, :, 4:5]   # 인덱스 4: volume
-        x_ind   = x[:, :, 5:]    # 인덱스 5~끝: 각종 보조지표들
+        x_price = x[:, :, 0:4]   
+        x_vol   = x[:, :, 4:5]   
+        x_ind   = x[:, :, 5:]    
 
-        # 각 전문가별 분석 (마지막 시점의 판단만 가져옴)
         out_price, _ = self.lstm_price(x_price)
         feat_price = self.bn_price(out_price[:, -1, :])
 
@@ -72,14 +63,11 @@ class MultiBranchCryptoPredictor(nn.Module):
         out_ind, _ = self.lstm_ind(x_ind)
         feat_ind = self.bn_ind(out_ind[:, -1, :])
 
-        # 세 전문가의 보고서를 하나로 합침 (가중치는 학습을 통해 자동 결정됨)
         combined_features = torch.cat((feat_price, feat_vol, feat_ind), dim=1)
-        
-        # 메타 러너의 최종 판결
         return self.meta_learner(combined_features)
 
 
-# 3. 양방향 라벨링 및 브랜치용 데이터 정렬
+# 3. 데이터 파이프라인: 동적 라벨링 적용
 def prepare_data(filepath, seq_length=120):
     print(f"[INFO] 학습 데이터 로드 중: {filepath}")
     df = pd.read_csv(filepath)
@@ -87,7 +75,6 @@ def prepare_data(filepath, seq_length=120):
     if 'atr' in df.columns:
         df.drop(columns=['atr'], inplace=True)
 
-    # 원본 데이터 수혈
     raw_filepath = filepath.replace("_processed.csv", "_5m_raw.csv")
     if not os.path.exists(raw_filepath):
         raise FileNotFoundError(f"[ERROR] 원본 데이터가 필요합니다: {raw_filepath}")
@@ -105,25 +92,42 @@ def prepare_data(filepath, seq_length=120):
     df['hour_sin'] = np.sin(2 * np.pi * dt.dt.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * dt.dt.hour / 24)
 
-    # Long / Short 트리플 배리어 라벨링
+    # 🌟 [GPT 조언 반영] 정답지 생성을 위한 % 단위 ATR (변동성) 직접 계산
+    prev_close = df['close_raw'].shift(1)
+    tr1 = df['high_raw'] - df['low_raw']
+    tr2 = (df['high_raw'] - prev_close).abs()
+    tr3 = (df['low_raw'] - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean()
+    df['atr_pct'] = (atr / df['close_raw']) * 100
+    df['atr_pct'].fillna(method='bfill', inplace=True)
+
+    # 🌟 [동적 트리플 배리어 라벨링] 장세에 따라 익절/손절선이 춤을 춥니다!
     horizon = 72
     close_prices = df['close_raw'].values
+    atr_pct_vals = df['atr_pct'].values
     n = len(close_prices)
     targets = np.zeros(n, dtype=int) 
 
     for i in range(n - horizon):
         curr_p = close_prices[i]
+        curr_atr = atr_pct_vals[i]
+        
+        # 동적 배리어 폭 산정 (익절: ATR의 2.0배, 손절: ATR의 1.0배 적용하되 최소치 보장)
+        tp_thresh = max(curr_atr * 2.0, 0.6)  # 최소 0.6%
+        sl_thresh = max(curr_atr * 1.0, 0.3)  # 최소 0.3%
+
         future_window = close_prices[i+1 : i+1+horizon]
         ret = (future_window - curr_p) / curr_p * 100
         
-        hit_tp_long = np.where(ret >= 1.0)[0]
-        hit_sl_long = np.where(ret <= -0.5)[0]
+        hit_tp_long = np.where(ret >= tp_thresh)[0]
+        hit_sl_long = np.where(ret <= -sl_thresh)[0]
         idx_tp_long = hit_tp_long[0] if len(hit_tp_long) > 0 else horizon + 1
         idx_sl_long = hit_sl_long[0] if len(hit_sl_long) > 0 else horizon + 1
         is_long = (idx_tp_long < idx_sl_long) and (idx_tp_long <= horizon)
         
-        hit_tp_short = np.where(ret <= -1.0)[0]
-        hit_sl_short = np.where(ret >= 0.5)[0]
+        hit_tp_short = np.where(ret <= -tp_thresh)[0]
+        hit_sl_short = np.where(ret >= sl_thresh)[0]
         idx_tp_short = hit_tp_short[0] if len(hit_tp_short) > 0 else horizon + 1
         idx_sl_short = hit_sl_short[0] if len(hit_sl_short) > 0 else horizon + 1
         is_short = (idx_tp_short < idx_sl_short) and (idx_tp_short <= horizon)
@@ -137,7 +141,7 @@ def prepare_data(filepath, seq_length=120):
 
     df['Target'] = targets
 
-    # 가격/거래량 피처 덮어쓰기
+    # 가격/거래량 스케일링
     price_cols = ['open', 'high', 'low', 'close']
     for col in price_cols:
         df[col] = df[f'{col}_raw'].pct_change().fillna(0)
@@ -148,13 +152,12 @@ def prepare_data(filepath, seq_length=120):
     vol_col = ['volume']
     df[vol_col[0]] = (df['volume_raw'] / vol_ma).clip(0, 10) 
 
-    drop_cols = [c for c in df.columns if c.endswith('_raw')]
+    # 🌟 [요청사항 완벽 반영] 라벨링에만 쓰고, 학습 피처에서는 완벽히 제거
+    drop_cols = [c for c in df.columns if c.endswith('_raw')] + ['atr_pct']
     df.drop(columns=drop_cols, inplace=True)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
 
-    # 🌟 [매우 중요] 멀티 브랜치 신경망을 위해 컬럼 순서를 강제로 정렬합니다. 🌟
-    # 0~3: 가격 / 4: 거래량 / 5~끝: 보조지표
     exclude_cols = ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200']
     ind_cols = [col for col in df.columns if col not in price_cols + vol_col + exclude_cols]
     
@@ -173,6 +176,7 @@ def prepare_data(filepath, seq_length=120):
     class_weights = len(y_train) / (3.0 * class_counts)
     class_weights = torch.tensor(class_weights, dtype=torch.float32)
 
+    print(f"[INFO] 🎯 동적 배리어 적용 완료 (최소 익절 0.6% / 손절 0.3%)")
     print(f"[INFO] 전문가 분할 - 가격(4), 거래량(1), 보조지표({len(ind_cols)})")
     print(f"[INFO] 라벨 분포 - 관망(0): {class_counts[0]} | 롱(1): {class_counts[1]} | 숏(2): {class_counts[2]}")
 
@@ -186,8 +190,7 @@ def prepare_data(filepath, seq_length=120):
 
     return train_loader, val_loader, test_loader, len(ind_cols), class_weights
 
-
-# 4. 모델 트레이너
+# 4. 실전 지표 기반 모델 트레이너 (F1-Score Monitoring)
 class ModelTrainer:
     def __init__(self, model, train_loader, val_loader, device, class_weights, patience=10):
         self.model = model.to(device)
@@ -195,15 +198,16 @@ class ModelTrainer:
         self.val_loader = val_loader
         self.device = device
         
-        # Label Smoothing (0.1) 추가: 과적합을 막고 모델이 한 방향으로 극단적인 확신을 가지는 것을 방어
         self.criterion = nn.CrossEntropyLoss(weight=class_weights.to(device), label_smoothing=0.1)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001, weight_decay=1e-4) # L2 정규화 강화
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=3)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001, weight_decay=1e-4)
+        
+        # 🌟 Loss가 아닌 F1 Score가 높아지는 쪽으로 LR을 조절 (mode='max')
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.5, patience=3)
         self.patience = patience
 
     def train(self, epochs=100):
         print(f"[INFO] 하드웨어 가속기({self.device}) 기반 다중 브랜치 학습 시작...")
-        best_val_loss = float('inf')
+        best_val_f1 = -1.0
         best_model_weights = None
         patience_counter = 0
 
@@ -226,27 +230,38 @@ class ModelTrainer:
 
             self.model.eval()
             val_loss = 0.0
+            val_preds = []
+            val_trues = []
             with torch.no_grad():
                 for X_batch, y_batch in self.val_loader:
                     X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
                     predictions = self.model(X_batch)
                     loss = self.criterion(predictions, y_batch)
                     val_loss += loss.item()
+                    
+                    _, predicted = torch.max(predictions.data, 1)
+                    val_preds.extend(predicted.cpu().numpy())
+                    val_trues.extend(y_batch.cpu().numpy())
 
             avg_val_loss = val_loss / len(self.val_loader)
             current_lr = self.optimizer.param_groups[0]['lr']
-            print(f"Epoch [{epoch+1:03d}/{epochs}] | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | LR: {current_lr:.6f}")
+            
+            # 🌟 실전 지표: 롱(1)과 숏(2)의 Macro F1 Score 계산
+            val_f1 = f1_score(val_trues, val_preds, labels=[1, 2], average='macro', zero_division=0)
+            
+            print(f"Epoch [{epoch+1:03d}/{epochs}] | Train Loss: {avg_train_loss:.4f} | Val F1(Long/Short): {val_f1:.4f} | LR: {current_lr:.6f}")
 
-            self.scheduler.step(avg_val_loss)
+            self.scheduler.step(val_f1)
 
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
+            # 조기 종료 기준도 F1 Score로 변경!
+            if val_f1 > best_val_f1:
+                best_val_f1 = val_f1
                 best_model_weights = deepcopy(self.model.state_dict())
                 patience_counter = 0
             else:
                 patience_counter += 1
                 if patience_counter >= self.patience:
-                    print(f"\n[INFO] 조기 종료(Early Stop) 발동!")
+                    print(f"\n[INFO] {self.patience} Epoch 동안 롱/숏 F1-Score 개선이 없어 조기 종료합니다!")
                     break
 
         if best_model_weights is not None:
@@ -283,14 +298,12 @@ if __name__ == "__main__":
     else:
         train_loader, val_loader, test_loader, num_indicators, class_weights = prepare_data(filepath, seq_length=120)
         
-        # 새로운 다중 브랜치 모델 초기화
         model = MultiBranchCryptoPredictor(num_indicators=num_indicators, dropout=0.3)
-        
         trainer = ModelTrainer(model, train_loader, val_loader, device, class_weights=class_weights, patience=10)
         trained_model = trainer.train(epochs=100)
         evaluate_model(trained_model, test_loader, device)
 
         os.makedirs("models", exist_ok=True)
-        save_path = "models/best_lstm_btc_5m_multibranch.pth"
+        save_path = "models/best_lstm_btc_5m_multibranch_v4.pth"
         torch.save(trained_model.state_dict(), save_path)
         print(f"[INFO] 💾 다중 브랜치 앙상블 모델 저장 완료: {save_path}")
