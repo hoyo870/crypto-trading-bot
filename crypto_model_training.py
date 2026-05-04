@@ -21,7 +21,7 @@ class CryptoTimeSeriesDataset(Dataset):
         return len(self.features) - self.seq_length
 
     def __getitem__(self, idx):
-        # seq_length(예: 60)만큼의 과거 데이터를 윈도우로 묶음
+        # seq_length(예: 120)만큼의 과거 데이터를 윈도우로 묶음
         x = self.features[idx : idx + self.seq_length]
         y = self.targets[idx + self.seq_length]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
@@ -85,14 +85,8 @@ class CryptoPredictorLSTM(nn.Module):
         out = self.fc(context)
         return out.squeeze()  # (batch_size,)
 
-# 5. 데이터 로딩 및 정답지(Label) 생성 로직
-def prepare_data(filepath, seq_length=120, min_return_pct=0.15):
-    """
-    Parameters
-    ----------
-    min_return_pct : 노이즈 필터링 기준 최소 수익률(%).
-                     |수익률| < min_return_pct인 애매한 샘플은 학습에서 제외한다.
-    """
+# 5. 데이터 로딩 및 정답지(Label) 생성 로직 (리스크 관리 Triple Barrier 적용)
+def prepare_data(filepath, seq_length=120):
     print(f"[INFO] 학습 데이터 로드 중: {filepath}")
     df = pd.read_csv(filepath)
 
@@ -108,18 +102,41 @@ def prepare_data(filepath, seq_length=120, min_return_pct=0.15):
     df['dow_sin']  = np.sin(2 * np.pi * dow  / 7)
     df['dow_cos']  = np.cos(2 * np.pi * dow  / 7)
 
-    # [노이즈 필터링 라벨링]
-    # 6봉(30분) 뒤 수익률이 +min_return_pct% 이상이면 1(상승),
-    # -min_return_pct% 이하이면 0(하락), 그 사이는 NaN(제외)
-    future_return = (df['close'].shift(-6) - df['close']) / df['close'] * 100
-    total_before = len(df)
-    df['Target'] = np.where(future_return >= min_return_pct, 1,
-                   np.where(future_return <= -min_return_pct, 0, np.nan))
+    # 🌟 [리스크 관리(Triple Barrier) 라벨링 적용] 🌟
+    tp_pct = 2.0   # 익절선: +2%
+    sl_pct = -1.0  # 손절선: -1%
+    horizon = 72   # 최대 대기 시간: 72봉 (5분봉 기준 6시간)
+    
+    print(f"[INFO] 🎯 리스크 관리 라벨링 중: 익절 +{tp_pct}%, 손절 {sl_pct}%, 최대 대기 {horizon}봉")
+    
+    close_prices = df['close'].values
+    n = len(close_prices)
+    targets = np.full(n, np.nan) 
+
+    # Numpy를 활용한 고속 연산 (미래 N봉 탐색)
+    for i in range(n - horizon):
+        curr_p = close_prices[i]
+        future_window = close_prices[i+1 : i+1+horizon]
+        
+        # 미래 N개의 수익률 계산
+        future_ret = (future_window - curr_p) / curr_p * 100
+        
+        # 익절/손절선 도달 시점(인덱스) 찾기
+        hit_tp = np.where(future_ret >= tp_pct)[0]
+        hit_sl = np.where(future_ret <= sl_pct)[0]
+        
+        idx_tp = hit_tp[0] if len(hit_tp) > 0 else horizon + 1
+        idx_sl = hit_sl[0] if len(hit_sl) > 0 else horizon + 1
+        
+        if idx_tp < idx_sl and idx_tp <= horizon:
+            targets[i] = 1  # 손절 안 당하고 익절선 먼저 터치 -> 매수(1)
+        else:
+            targets[i] = 0  # 손절선 터치 혹은 시간 내 도달 못 함 -> 매수 안 함(0)
+
+    df['Target'] = targets
     df.dropna(subset=['Target'], inplace=True)
     df['Target'] = df['Target'].astype(int)
-    noise_filtered = total_before - len(df)
-    print(f"[INFO] 노이즈 필터링: {noise_filtered}개 샘플 제외 (|수익률| < {min_return_pct}%)")
-
+    
     # 🌟 [수익률 변환] 가격 및 볼륨 데이터를 변화율(%)로 변환
     price_volume_cols = ['open', 'high', 'low', 'close', 'volume']
     df[price_volume_cols] = df[price_volume_cols].pct_change().fillna(0)
@@ -130,7 +147,7 @@ def prepare_data(filepath, seq_length=120, min_return_pct=0.15):
         q_hi = df[col].quantile(0.999)
         df[col] = df[col].clip(q_lo, q_hi)
 
-    # 미래 데이터를 당겨오면서 발생한 맨 마지막 6개의 결측치 행 제거
+    # 미래 데이터를 당겨오면서 발생한 결측치 행 제거
     df.dropna(inplace=True)
 
     # 모델 학습에 불필요한 날짜/타겟 컬럼 제외하고 순수 피처만 추출
@@ -149,11 +166,11 @@ def prepare_data(filepath, seq_length=120, min_return_pct=0.15):
     X_val, y_val = features[train_end:val_end], targets[train_end:val_end]
     X_test, y_test = features[val_end:], targets[val_end:]
 
-    # 클래스 불균형 처리: 상승/하락 비율로 pos_weight 계산
+    # 클래스 불균형 처리 (1의 개수가 적을 테니 가중치를 부여)
     pos_count = y_train.sum()
     neg_count = len(y_train) - pos_count
     pos_weight = torch.tensor([neg_count / max(pos_count, 1)], dtype=torch.float32)
-    print(f"[INFO] 클래스 분포 - 상승: {pos_count} | 하락: {neg_count} | pos_weight: {pos_weight.item():.4f}")
+    print(f"[INFO] 클래스 분포 - 진입 찬스(1): {pos_count} | 관망/위험(0): {neg_count} | pos_weight: {pos_weight.item():.4f}")
 
     # DataLoader 생성
     train_dataset = CryptoTimeSeriesDataset(X_train, y_train, seq_length)
@@ -164,7 +181,7 @@ def prepare_data(filepath, seq_length=120, min_return_pct=0.15):
     val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
 
-    print(f"[INFO] 모델 입력 피처 개수: {len(feature_cols)}개 (수익률 변환 완료) {feature_cols}")
+    print(f"[INFO] 모델 입력 피처 개수: {len(feature_cols)}개 (수익률 변환 완료)")
     print(f"[INFO] 분할 완료 - Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_dataset)}")
     return train_loader, val_loader, test_loader, len(feature_cols), pos_weight
 
@@ -176,7 +193,7 @@ class ModelTrainer:
         self.val_loader = val_loader
         self.device = device
 
-        # Focal Loss: 클래스 불균형 + 어려운 샘플 집중 (gamma=2 표준값)
+        # Focal Loss: 클래스 불균형 + 어려운 샘플 집중
         alpha = pos_weight.item() if pos_weight is not None else 1.0
         self.criterion = FocalLoss(alpha=alpha, gamma=2.0)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001, weight_decay=1e-5)
@@ -251,7 +268,6 @@ class ModelTrainer:
 def find_optimal_threshold(model, val_loader, device):
     """
     검증셋에서 F1-Score가 최대인 임계값을 탐색한다.
-    0.5 고정 대신 데이터에 맞는 최적 임계값을 사용하면 정확도가 향상된다.
     """
     model.eval()
     all_probs  = []
@@ -268,14 +284,15 @@ def find_optimal_threshold(model, val_loader, device):
     all_labels = np.array(all_labels)
 
     best_thresh, best_f1 = 0.5, 0.0
-    for thresh in np.arange(0.3, 0.71, 0.01):
+    for thresh in np.arange(0.3, 0.95, 0.01):
         preds = (all_probs >= thresh).astype(int)
         score = f1_score(all_labels, preds, zero_division=0)
         if score > best_f1:
             best_f1, best_thresh = score, thresh
 
-    print(f"[INFO] 최적 임계값: {best_thresh:.2f} (Val F1: {best_f1:.4f})")
-    return best_thresh
+    print(f"[INFO] 최적 임계값 탐색 완료: {best_thresh:.2f} (Val F1: {best_f1:.4f})")
+    # 임계값을 보수적으로 약간 높게 조정 (가짜 신호 방어)
+    return min(best_thresh + 0.05, 0.90)
 
 
 # 8. 최종 모델 평가 함수
@@ -306,9 +323,9 @@ def evaluate_model(model, test_loader, device, threshold=0.5):
     print(f"\n[RESULT] ========================================")
     print(f"  Threshold: {threshold:.2f}")
     print(f"  Accuracy : {accuracy:.2f}%")
-    print(f"  Precision: {precision:.4f}")
-    print(f"  Recall   : {recall:.4f}")
-    print(f"  F1-Score : {f1:.4f}")
+    print(f"  Precision(적중률) : {precision:.4f} -> 내가 1이라 찍었을 때 실제로 맞출 확률")
+    print(f"  Recall(탐지율)    : {recall:.4f} -> 전체 기회 중 놓치지 않고 잡아낸 비율")
+    print(f"  F1-Score         : {f1:.4f}")
     print(f"  Confusion Matrix:\n{cm}")
     print(f"[RESULT] ========================================\n")
 
@@ -323,20 +340,20 @@ if __name__ == "__main__":
     if not os.path.exists(filepath):
         print(f"[ERROR] '{filepath}' 파일을 찾을 수 없습니다. 경로를 확인해 주세요.")
     else:
-        # 과거 120개 캔들(10시간)을 보고 30분 뒤 예측
+        # 과거 120개 캔들(10시간)을 보고 매매 적합성 평가
         train_loader, val_loader, test_loader, input_size, pos_weight = prepare_data(filepath, seq_length=120)
 
-        # 모델 세팅 (hidden_size=256, num_layers=3, Attention 포함)
+        # 모델 세팅
         model = CryptoPredictorLSTM(input_size=input_size, hidden_size=256, num_layers=3, dropout=0.3)
 
-        # 학습 시작 (최대 100번 반복, 10번 연속 개선 없으면 조기 종료)
+        # 학습 시작
         trainer = ModelTrainer(model, train_loader, val_loader, device, patience=10, pos_weight=pos_weight)
         trained_model = trainer.train(epochs=100)
 
         # 검증셋 기반 최적 임계값 탐색
         best_threshold = find_optimal_threshold(trained_model, val_loader, device)
 
-        # 성과 측정 (최적 임계값 적용)
+        # 성과 측정
         evaluate_model(trained_model, test_loader, device, threshold=best_threshold)
 
         # 최종 실전 투입용 모델 파일 저장
