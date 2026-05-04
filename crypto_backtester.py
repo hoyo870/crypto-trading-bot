@@ -16,6 +16,99 @@ warnings.filterwarnings('ignore')
 
 
 # ─────────────────────────────────────────────────────────────
+# 앙상블 모델 로더 및 예측 함수
+# ─────────────────────────────────────────────────────────────
+def _load_ensemble_models(model_dir, num_models, device):
+    """앙상블 디렉토리에서 모델들 로드"""
+    models = []
+    for i in range(num_models):
+        model_path = os.path.join(model_dir, f"model_{i}.pth")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"앙상블 모델을 찾을 수 없습니다: {model_path}")
+        
+        # 모델 생성 (num_indicators, num_patterns는 현재 데이터와 일치해야 함)
+        model = MultiBranchCryptoPredictor(num_indicators=19, num_patterns=10, dropout=0.3)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.to(device)
+        model.eval()
+        models.append(model)
+    
+    print(f"[INFO] 앙상블 모델 로드 완료: {num_models}개 모델")
+    return models
+
+
+def _ensemble_predict_soft(models, batch):
+    """
+    Soft Voting: 모든 모델의 확률을 평균
+    
+    Returns:
+    --------
+    ensemble_probs : np.ndarray (batch_size, 3)
+        평균 확률
+    ensemble_stds : np.ndarray (batch_size, 3)
+        각 클래스 확률의 표준편차
+    agreement_count : np.ndarray (batch_size,)
+        가장 높은 확률 클래스에 동의한 모델 개수
+    """
+    all_probs = []
+    
+    with torch.no_grad():
+        for model in models:
+            outputs = model(batch)
+            probs = torch.softmax(outputs, dim=1).cpu().numpy()
+            all_probs.append(probs)
+    
+    # (num_models, batch_size, 3) → (batch_size, 3)
+    all_probs = np.array(all_probs)  # (num_models, batch_size, 3)
+    ensemble_probs = all_probs.mean(axis=0)  # 평균
+    ensemble_stds = all_probs.std(axis=0)    # 표준편차
+    
+    # 합의도 계산: 각 샘플에서 주요 클래스로 투표한 모델 개수
+    main_class = ensemble_probs.argmax(axis=1)  # (batch_size,)
+    agreement_count = np.zeros(len(batch))
+    for i in range(len(batch)):
+        for j, probs in enumerate(all_probs):
+            if probs[i].argmax() == main_class[i]:
+                agreement_count[i] += 1
+    
+    return ensemble_probs, ensemble_stds, agreement_count
+
+
+def _ensemble_predict_hard(models, batch):
+    """
+    Hard Voting: 모델들의 다수결
+    
+    Returns:
+    --------
+    ensemble_class : np.ndarray (batch_size,)
+        투표 결과 클래스
+    agreement_count : np.ndarray (batch_size,)
+        해당 클래스에 투표한 모델 개수
+    """
+    all_preds = []
+    
+    with torch.no_grad():
+        for model in models:
+            outputs = model(batch)
+            _, predicted = torch.max(outputs.data, 1)
+            all_preds.append(predicted.cpu().numpy())
+    
+    all_preds = np.array(all_preds)  # (num_models, batch_size)
+    
+    # 다수결
+    ensemble_class = np.zeros(all_preds.shape[1], dtype=int)
+    agreement_count = np.zeros(all_preds.shape[1], dtype=int)
+    
+    for i in range(all_preds.shape[1]):
+        votes = all_preds[:, i]
+        unique, counts = np.unique(votes, return_counts=True)
+        ensemble_class[i] = unique[counts.argmax()]
+        agreement_count[i] = counts.max()
+    
+    return ensemble_class, agreement_count
+
+
+# ─────────────────────────────────────────────────────────────
 # 슬라이딩 윈도우 데이터셋 (배치 추론용)
 # ─────────────────────────────────────────────────────────────
 class SlidingWindowDataset(Dataset):
@@ -288,7 +381,7 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
 
 def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.35,
                        batch_size=512, tp_pct=0.015, sl_pct=-0.005,
-                       horizon=72):
+                       horizon=72, use_ensemble=False, ensemble_mode='soft', ensemble_count=5):
     """
     실제 매매 없이 모델 신호의 승/패만 추적하는 리포트 모드.
     - 신호 발생 조건: long_prob 또는 short_prob >= threshold_prob
@@ -369,14 +462,47 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
     dataset = SlidingWindowDataset(test_features, seq_length)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
     predictions = []
+    prediction_stds = []
+    agreement_counts = []
 
-    with torch.no_grad():
-        for batch in loader:
-            batch = batch.to(device)
-            probs = torch.softmax(model(batch), dim=1).cpu().numpy()
-            predictions.extend(probs)
+    if use_ensemble:
+        # 앙상블 모드
+        ensemble_models = _load_ensemble_models("models/ensemble", ensemble_count, device)
+        print(f"[INFO] 앙상블 추론 시작 (모드: {ensemble_mode}, {ensemble_count}개 모델)...")
+        
+        with torch.no_grad():
+            for batch in loader:
+                batch = batch.to(device)
+                
+                if ensemble_mode == 'soft':
+                    # Soft Voting
+                    probs, stds, agreement = _ensemble_predict_soft(ensemble_models, batch)
+                    predictions.extend(probs)
+                    prediction_stds.extend(stds)
+                    agreement_counts.extend(agreement)
+                else:
+                    # Hard Voting → 확률로 변환
+                    class_pred, agreement = _ensemble_predict_hard(ensemble_models, batch)
+                    # Hard voting 결과를 확률로 표현
+                    probs_hard = np.zeros((len(batch), 3))
+                    for i, cls in enumerate(class_pred):
+                        probs_hard[i, cls] = agreement[i] / ensemble_count
+                    predictions.extend(probs_hard)
+                    agreement_counts.extend(agreement)
+                    prediction_stds.extend(np.zeros((len(batch), 3)))
+    else:
+        # 단일 모델 모드
+        with torch.no_grad():
+            for batch in loader:
+                batch = batch.to(device)
+                probs = torch.softmax(model(batch), dim=1).cpu().numpy()
+                predictions.extend(probs)
+                prediction_stds.extend(np.zeros_like(probs))
+                agreement_counts.extend(np.ones(len(batch)) * 1)
 
     print(f"[INFO] 추론 완료 — {len(predictions):,}개 예측 ({time.time()-t_infer:.1f}초)")
+    if use_ensemble:
+        print(f"[INFO] 앙상블 모드: {ensemble_mode.upper()} ({ensemble_count}개 모델)")
     print(f"[INFO] 신호 조건: prob >= {threshold_prob:.2f}, TP={tp_pct*100:.2f}%, SL={sl_pct*100:.2f}%, horizon={horizon} bars")
 
     long_signal_logs = []
@@ -463,6 +589,13 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
         bars_held = exit_idx - entry_idx
         exit_date = pd.to_datetime(test_dates[exit_idx])
 
+        # 앙상블 신뢰도 계산
+        class_idx = 1 if signal_type == 'Long' else 2
+        ensemble_avg_prob = float(probs[class_idx])
+        ensemble_std = float(prediction_stds[i][class_idx])
+        agreement = int(agreement_counts[i])
+        confidence = (agreement / (ensemble_count if use_ensemble else 1)) * 100
+
         signal_log = {
             'entry_date': entry_date,
             'type': signal_type,
@@ -474,6 +607,10 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
             'exit_date': exit_date,
             'mfe_pct': mfe * 100,
             'mae_pct': mae * 100,
+            'ensemble_avg_prob': ensemble_avg_prob,
+            'ensemble_std': ensemble_std,
+            'agreement': agreement,
+            'confidence': confidence,
         }
         
         if signal_type == 'Long':
@@ -531,22 +668,40 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
             f.write(f"신호 추적 로그 - {symbol} ({position_type})\n")
             f.write(f"생성 일시: {pd.Timestamp.now()}\n")
             f.write(f"신호 조건: prob >= {threshold_prob:.2f}, TP={tp_pct*100:.2f}%, SL={sl_pct*100:.2f}%, horizon={horizon} bars\n")
+            if use_ensemble:
+                f.write(f"앙상블: {ensemble_mode.upper()} ({ensemble_count}개 모델)\n")
             f.write(f"\n총 신호 {len(signal_logs)}건 | 적중률 {wr:.2f}%\n")
-            f.write("\n" + "="*120 + "\n")
-            f.write("date                | prob   | MFE%    | MAE%    | result | ret%    | bars | reason\n")
-            f.write("-"*120 + "\n")
+            f.write("\n" + "="*160 + "\n")
             
-            for row in signal_logs:
-                f.write(
-                    f"{row['entry_date']} | "
-                    f"{row['prob']*100:>5.2f}% | "
-                    f"{row['mfe_pct']:>+7.3f}% | "
-                    f"{row['mae_pct']:>+7.3f}% | "
-                    f"{row['outcome']:<6} | "
-                    f"{row['ret_pct']:>+7.3f}% | "
-                    f"{row['bars']:>4} | "
-                    f"{row['reason']}\n"
-                )
+            if use_ensemble:
+                f.write("date                | prob   | MFE%    | MAE%    | result | ret%    | bars | confidence | reason\n")
+                f.write("-"*160 + "\n")
+                for row in signal_logs:
+                    f.write(
+                        f"{row['entry_date']} | "
+                        f"{row['prob']*100:>5.2f}% | "
+                        f"{row['mfe_pct']:>+7.3f}% | "
+                        f"{row['mae_pct']:>+7.3f}% | "
+                        f"{row['outcome']:<6} | "
+                        f"{row['ret_pct']:>+7.3f}% | "
+                        f"{row['bars']:>4} | "
+                        f"{row['confidence']:>6.1f}% ({int(row['agreement'])}/{ensemble_count}) | "
+                        f"{row['reason']}\n"
+                    )
+            else:
+                f.write("date                | prob   | MFE%    | MAE%    | result | ret%    | bars | reason\n")
+                f.write("-"*160 + "\n")
+                for row in signal_logs:
+                    f.write(
+                        f"{row['entry_date']} | "
+                        f"{row['prob']*100:>5.2f}% | "
+                        f"{row['mfe_pct']:>+7.3f}% | "
+                        f"{row['mae_pct']:>+7.3f}% | "
+                        f"{row['outcome']:<6} | "
+                        f"{row['ret_pct']:>+7.3f}% | "
+                        f"{row['bars']:>4} | "
+                        f"{row['reason']}\n"
+                    )
         
         print(f"[INFO] ✅ {position_type} 신호 로그 저장 완료: {log_filename} ({len(signal_logs)}건)")
     
@@ -567,6 +722,12 @@ if __name__ == "__main__":
                         help="Stop loss ratio. e.g. -0.015 = -1.5%")
     parser.add_argument("--horizon", type=int, default=72,
                         help="Maximum holding bars / signal evaluation horizon")
+    parser.add_argument("--use-ensemble", action="store_true",
+                        help="Use ensemble models instead of single model")
+    parser.add_argument("--ensemble-mode", choices=["soft", "hard"], default="soft",
+                        help="Ensemble voting mode (soft=probability average, hard=majority vote)")
+    parser.add_argument("--ensemble-count", type=int, default=5,
+                        help="Number of ensemble models to load (3, 4, or 5)")
     args = parser.parse_args()
 
     if args.mode in ["backtest", "both"]:
@@ -593,4 +754,7 @@ if __name__ == "__main__":
             tp_pct=args.tp_pct,
             sl_pct=args.sl_pct,
             horizon=args.horizon,
+            use_ensemble=args.use_ensemble,
+            ensemble_mode=args.ensemble_mode,
+            ensemble_count=args.ensemble_count,
         )
