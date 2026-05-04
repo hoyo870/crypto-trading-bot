@@ -6,6 +6,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from copy import deepcopy
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
+import talib
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -24,20 +25,28 @@ class CryptoTimeSeriesDataset(Dataset):
         y = self.targets[idx + self.seq_length]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
 
-# 2. 멀티 브랜치 신경망
+# 2. 🌟 [업데이트] 4개의 브랜치로 확장된 신경망
 class MultiBranchCryptoPredictor(nn.Module):
-    def __init__(self, num_indicators, hidden_price=64, hidden_vol=32, hidden_ind=64, dropout=0.3):
+    def __init__(self, num_indicators, num_patterns, hidden_price=64, hidden_vol=32, hidden_ind=64, hidden_pat=32, dropout=0.3):
         super(MultiBranchCryptoPredictor, self).__init__()
         
+        self.num_ind = num_indicators
+        self.num_pat = num_patterns
+
+        # 4명의 전문가 (Branches)
         self.lstm_price = nn.LSTM(4, hidden_price, num_layers=2, batch_first=True, dropout=dropout)
         self.lstm_vol = nn.LSTM(1, hidden_vol, num_layers=2, batch_first=True, dropout=dropout)
         self.lstm_ind = nn.LSTM(num_indicators, hidden_ind, num_layers=2, batch_first=True, dropout=dropout)
+        self.lstm_pat = nn.LSTM(num_patterns, hidden_pat, num_layers=2, batch_first=True, dropout=dropout) # 신규: 패턴 전문가
 
+        # 정규화 레이어
         self.bn_price = nn.BatchNorm1d(hidden_price)
         self.bn_vol = nn.BatchNorm1d(hidden_vol)
         self.bn_ind = nn.BatchNorm1d(hidden_ind)
+        self.bn_pat = nn.BatchNorm1d(hidden_pat)
 
-        combined_size = hidden_price + hidden_vol + hidden_ind
+        # 메타 러너 (통합 결정권자)
+        combined_size = hidden_price + hidden_vol + hidden_ind + hidden_pat
         self.meta_learner = nn.Sequential(
             nn.Linear(combined_size, 128),
             nn.ReLU(),
@@ -50,9 +59,11 @@ class MultiBranchCryptoPredictor(nn.Module):
         )
 
     def forward(self, x):
+        # 입력 데이터를 4개의 특성으로 정확히 분할
         x_price = x[:, :, 0:4]   
         x_vol   = x[:, :, 4:5]   
-        x_ind   = x[:, :, 5:]    
+        x_ind   = x[:, :, 5 : 5 + self.num_ind]    
+        x_pat   = x[:, :, 5 + self.num_ind :] # 신규: 패턴 데이터
 
         out_price, _ = self.lstm_price(x_price)
         feat_price = self.bn_price(out_price[:, -1, :])
@@ -63,11 +74,15 @@ class MultiBranchCryptoPredictor(nn.Module):
         out_ind, _ = self.lstm_ind(x_ind)
         feat_ind = self.bn_ind(out_ind[:, -1, :])
 
-        combined_features = torch.cat((feat_price, feat_vol, feat_ind), dim=1)
+        out_pat, _ = self.lstm_pat(x_pat)
+        feat_pat = self.bn_pat(out_pat[:, -1, :])
+
+        # 4개 전문가의 의견 병합
+        combined_features = torch.cat((feat_price, feat_vol, feat_ind, feat_pat), dim=1)
         return self.meta_learner(combined_features)
 
 
-# 3. 데이터 파이프라인: 동적 라벨링 적용
+# 3. 데이터 파이프라인: 캔들 패턴 추출 로직 추가
 def prepare_data(filepath, seq_length=120):
     print(f"[INFO] 학습 데이터 로드 중: {filepath}")
     df = pd.read_csv(filepath)
@@ -92,7 +107,25 @@ def prepare_data(filepath, seq_length=120):
     df['hour_sin'] = np.sin(2 * np.pi * dt.dt.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * dt.dt.hour / 24)
 
-    # 🌟 [GPT 조언 반영] 정답지 생성을 위한 % 단위 ATR (변동성) 직접 계산
+    # 🌟 [V5 신규] TA-Lib 10대 핵심 캔들 패턴 추출 (원본 가격 기준)
+    o = df['open_raw'].values
+    h = df['high_raw'].values
+    l = df['low_raw'].values
+    c = df['close_raw'].values
+
+    # TA-Lib는 패턴 발견 시 100 또는 -100을 반환하므로, 신경망에 맞게 1.0 / -1.0으로 스케일링
+    df['pat_doji']         = talib.CDLDOJI(o, h, l, c) / 100.0
+    df['pat_hammer']       = talib.CDLHAMMER(o, h, l, c) / 100.0
+    df['pat_engulfing']    = talib.CDLENGULFING(o, h, l, c) / 100.0
+    df['pat_morningstar']  = talib.CDLMORNINGSTAR(o, h, l, c) / 100.0
+    df['pat_eveningstar']  = talib.CDLEVENINGSTAR(o, h, l, c) / 100.0
+    df['pat_shootingstar'] = talib.CDLSHOOTINGSTAR(o, h, l, c) / 100.0
+    df['pat_hangingman']   = talib.CDLHANGINGMAN(o, h, l, c) / 100.0
+    df['pat_piercing']     = talib.CDLPIERCING(o, h, l, c) / 100.0
+    df['pat_darkcloud']    = talib.CDLDARKCLOUDCOVER(o, h, l, c) / 100.0
+    df['pat_harami']       = talib.CDLHARAMI(o, h, l, c) / 100.0
+
+    # 동적 ATR 변동성 계산
     prev_close = df['close_raw'].shift(1)
     tr1 = df['high_raw'] - df['low_raw']
     tr2 = (df['high_raw'] - prev_close).abs()
@@ -102,7 +135,7 @@ def prepare_data(filepath, seq_length=120):
     df['atr_pct'] = (atr / df['close_raw']) * 100
     df['atr_pct'].fillna(method='bfill', inplace=True)
 
-    # 🌟 [동적 트리플 배리어 라벨링] 장세에 따라 익절/손절선이 춤을 춥니다!
+    # 동적 트리플 배리어 라벨링
     horizon = 72
     close_prices = df['close_raw'].values
     atr_pct_vals = df['atr_pct'].values
@@ -113,9 +146,8 @@ def prepare_data(filepath, seq_length=120):
         curr_p = close_prices[i]
         curr_atr = atr_pct_vals[i]
         
-        # 동적 배리어 폭 산정 (익절: ATR의 2.0배, 손절: ATR의 1.0배 적용하되 최소치 보장)
-        tp_thresh = max(curr_atr * 2.0, 0.6)  # 최소 0.6%
-        sl_thresh = max(curr_atr * 1.0, 0.3)  # 최소 0.3%
+        tp_thresh = max(curr_atr * 2.0, 0.6)  
+        sl_thresh = max(curr_atr * 1.0, 0.3)  
 
         future_window = close_prices[i+1 : i+1+horizon]
         ret = (future_window - curr_p) / curr_p * 100
@@ -152,16 +184,18 @@ def prepare_data(filepath, seq_length=120):
     vol_col = ['volume']
     df[vol_col[0]] = (df['volume_raw'] / vol_ma).clip(0, 10) 
 
-    # 🌟 [요청사항 완벽 반영] 라벨링에만 쓰고, 학습 피처에서는 완벽히 제거
+    # 불필요 원본 컬럼 제거
     drop_cols = [c for c in df.columns if c.endswith('_raw')] + ['atr_pct']
     df.drop(columns=drop_cols, inplace=True)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
 
+    # 🌟 피처 강제 정렬 (가격 -> 거래량 -> 보조지표 -> 패턴)
     exclude_cols = ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200']
-    ind_cols = [col for col in df.columns if col not in price_cols + vol_col + exclude_cols]
+    pat_cols = [c for c in df.columns if c.startswith('pat_')]
+    ind_cols = [c for c in df.columns if c not in price_cols + vol_col + pat_cols + exclude_cols]
     
-    feature_cols = price_cols + vol_col + ind_cols
+    feature_cols = price_cols + vol_col + ind_cols + pat_cols
     features = df[feature_cols].values
     targets = df['Target'].values
 
@@ -176,8 +210,8 @@ def prepare_data(filepath, seq_length=120):
     class_weights = len(y_train) / (3.0 * class_counts)
     class_weights = torch.tensor(class_weights, dtype=torch.float32)
 
-    print(f"[INFO] 🎯 동적 배리어 적용 완료 (최소 익절 0.6% / 손절 0.3%)")
-    print(f"[INFO] 전문가 분할 - 가격(4), 거래량(1), 보조지표({len(ind_cols)})")
+    print(f"[INFO] 🎯 V5 캔들 패턴 10종 장착 완료")
+    print(f"[INFO] 전문가 분할 - 가격(4), 거래량(1), 보조지표({len(ind_cols)}), 캔들패턴({len(pat_cols)})")
     print(f"[INFO] 라벨 분포 - 관망(0): {class_counts[0]} | 롱(1): {class_counts[1]} | 숏(2): {class_counts[2]}")
 
     train_dataset = CryptoTimeSeriesDataset(X_train, y_train, seq_length)
@@ -188,25 +222,67 @@ def prepare_data(filepath, seq_length=120):
     val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
 
-    return train_loader, val_loader, test_loader, len(ind_cols), class_weights
+    return train_loader, val_loader, test_loader, len(ind_cols), len(pat_cols), class_weights
 
-# 4. 실전 지표 기반 모델 트레이너 (F1-Score Monitoring)
+# 4. Focal Loss: 어려운 샘플에 더 집중하는 손실 함수
+class FocalLoss(nn.Module):
+    """
+    Focal Loss = -α * (1 - p_t)^γ * log(p_t)
+    
+    Parameters:
+    - gamma: focusing parameter (기본 2.0)
+    - class_weights: 클래스 가중치 (불균형 해결)
+    - label_smoothing: 라벨 스무딩
+    """
+    def __init__(self, gamma=2.0, class_weights=None, label_smoothing=0.1):
+        super().__init__()
+        self.gamma = gamma
+        self.class_weights = class_weights
+        self.label_smoothing = label_smoothing
+
+    def forward(self, inputs, targets):
+        # 기본 크로스엔트로피 손실 (라벨 스무딩 포함)
+        ce_loss = nn.functional.cross_entropy(
+            inputs,
+            targets,
+            weight=self.class_weights,
+            label_smoothing=self.label_smoothing,
+            reduction='none'
+        )
+        
+        # 확률 계산: p_t = exp(-ce_loss)
+        p = torch.exp(-ce_loss)
+        
+        # Focal Loss = (1-p)^γ * ce_loss
+        # γ=0: 기본 CE와 동일
+        # γ>0: 쉬운 샘플(p 높음)은 다운웨이팅, 어려운 샘플(p 낮음)은 업웨이팅
+        focal_loss = (1 - p) ** self.gamma * ce_loss
+        
+        return focal_loss.mean()
+
+# 5. 실전 지표 기반 모델 트레이너
 class ModelTrainer:
-    def __init__(self, model, train_loader, val_loader, device, class_weights, patience=10):
+    def __init__(self, model, train_loader, val_loader, device, class_weights, patience=10, use_focal_loss=True, gamma=2.0):
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
+        self.use_focal_loss = use_focal_loss
         
-        self.criterion = nn.CrossEntropyLoss(weight=class_weights.to(device), label_smoothing=0.1)
+        # Focal Loss 또는 CrossEntropyLoss 선택
+        if use_focal_loss:
+            self.criterion = FocalLoss(gamma=gamma, class_weights=class_weights.to(device), label_smoothing=0.1)
+            print(f"[INFO] 🎯 Focal Loss 적용 (γ={gamma}, 어려운 샘플에 가중 집중)")
+        else:
+            self.criterion = nn.CrossEntropyLoss(weight=class_weights.to(device), label_smoothing=0.1)
+            print(f"[INFO] CrossEntropyLoss 적용")
+        
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001, weight_decay=1e-4)
-        
-        # 🌟 Loss가 아닌 F1 Score가 높아지는 쪽으로 LR을 조절 (mode='max')
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.5, patience=3)
         self.patience = patience
 
     def train(self, epochs=100):
-        print(f"[INFO] 하드웨어 가속기({self.device}) 기반 다중 브랜치 학습 시작...")
+        print(f"[INFO] 하드웨어 가속기({self.device}) 기반 4-Branch 학습 시작...")
         best_val_f1 = -1.0
         best_model_weights = None
         patience_counter = 0
@@ -246,14 +322,12 @@ class ModelTrainer:
             avg_val_loss = val_loss / len(self.val_loader)
             current_lr = self.optimizer.param_groups[0]['lr']
             
-            # 🌟 실전 지표: 롱(1)과 숏(2)의 Macro F1 Score 계산
             val_f1 = f1_score(val_trues, val_preds, labels=[1, 2], average='macro', zero_division=0)
             
             print(f"Epoch [{epoch+1:03d}/{epochs}] | Train Loss: {avg_train_loss:.4f} | Val F1(Long/Short): {val_f1:.4f} | LR: {current_lr:.6f}")
 
             self.scheduler.step(val_f1)
 
-            # 조기 종료 기준도 F1 Score로 변경!
             if val_f1 > best_val_f1:
                 best_val_f1 = val_f1
                 best_model_weights = deepcopy(self.model.state_dict())
@@ -268,7 +342,7 @@ class ModelTrainer:
             self.model.load_state_dict(best_model_weights)
         return self.model
 
-# 5. 최종 모델 평가
+# 6. 최종 모델 평가
 def evaluate_model(model, test_loader, device):
     model.eval()
     all_preds = []
@@ -296,14 +370,16 @@ if __name__ == "__main__":
     if not os.path.exists(filepath):
         print(f"[ERROR] '{filepath}' 파일을 찾을 수 없습니다.")
     else:
-        train_loader, val_loader, test_loader, num_indicators, class_weights = prepare_data(filepath, seq_length=120)
+        # V5 로드
+        train_loader, val_loader, test_loader, num_ind, num_pat, class_weights = prepare_data(filepath, seq_length=120)
         
-        model = MultiBranchCryptoPredictor(num_indicators=num_indicators, dropout=0.3)
+        # 모델 파라미터 업데이트
+        model = MultiBranchCryptoPredictor(num_indicators=num_ind, num_patterns=num_pat, dropout=0.3)
         trainer = ModelTrainer(model, train_loader, val_loader, device, class_weights=class_weights, patience=10)
         trained_model = trainer.train(epochs=100)
         evaluate_model(trained_model, test_loader, device)
 
         os.makedirs("models", exist_ok=True)
-        save_path = "models/best_lstm_btc_5m_multibranch_v4.pth"
+        save_path = "models/best_lstm_btc_5m_v5.pth"
         torch.save(trained_model.state_dict(), save_path)
-        print(f"[INFO] 💾 다중 브랜치 앙상블 모델 저장 완료: {save_path}")
+        print(f"[INFO] 💾 V5 모델 저장 완료: {save_path}")
