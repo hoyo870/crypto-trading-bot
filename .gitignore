@@ -11,3 +11,4 @@ venv/
 # data/*.csv
 # models/*.pth
 !data/scalers/*.pkl
+.DS_Store
