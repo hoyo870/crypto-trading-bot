@@ -243,18 +243,36 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
         equity_curve.append(balance)
 
     # 4. 결과 분석
-    win_trades = [t for t in trades if t['return_pct'] > 0]
+    win_trades  = [t for t in trades if t['return_pct'] > 0]
     loss_trades = [t for t in trades if t['return_pct'] <= 0]
     win_rate = (len(win_trades) / len(trades) * 100) if trades else 0
-    pnl_pct = ((balance - initial_balance) / initial_balance) * 100
+    pnl_pct  = ((balance - initial_balance) / initial_balance) * 100
+
+    # 포지션별 분리
+    long_trades  = [t for t in trades if t['type'] == 'Long']
+    short_trades = [t for t in trades if t['type'] == 'Short']
+
+    long_win   = [t for t in long_trades  if t['return_pct'] > 0]
+    long_loss  = [t for t in long_trades  if t['return_pct'] <= 0]
+    short_win  = [t for t in short_trades if t['return_pct'] > 0]
+    short_loss = [t for t in short_trades if t['return_pct'] <= 0]
+
+    long_wr  = (len(long_win)  / len(long_trades)  * 100) if long_trades  else 0.0
+    short_wr = (len(short_win) / len(short_trades) * 100) if short_trades else 0.0
 
     print(f"\n========================================")
     print(f"📊 백테스트 결과 리포트 (V4 양방향)")
     print(f"========================================")
-    print(f"총 거래 횟수: {len(trades)}회")
-    print(f"승률(Win Rate): {win_rate:.2f}% ({len(win_trades)}승 / {len(loss_trades)}패)")
-    print(f"최종 자산: {balance:,.2f} USDT")
-    print(f"총 수익률(PnL): {pnl_pct:.2f}%")
+    print(f"총 거래 횟수 : {len(trades):>5}회")
+    print(f"전체 승률    : {win_rate:>6.2f}%  ({len(win_trades)}승 / {len(loss_trades)}패)")
+    print(f"----------------------------------------")
+    print(f"[Long ]  총 {len(long_trades):>4}회  |  "
+          f"승률 {long_wr:>6.2f}%  |  {len(long_win)}승 / {len(long_loss)}패")
+    print(f"[Short]  총 {len(short_trades):>4}회  |  "
+          f"승률 {short_wr:>6.2f}%  |  {len(short_win)}승 / {len(short_loss)}패")
+    print(f"----------------------------------------")
+    print(f"최종 자산    : {balance:>12,.2f} USDT")
+    print(f"총 수익률    : {pnl_pct:>+8.2f}%")
     print(f"========================================")
 
     plt.figure(figsize=(12, 6))
