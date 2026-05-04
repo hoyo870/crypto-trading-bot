@@ -365,6 +365,62 @@ class CryptoDataPreprocessor:
         logger.info("ATR(%d) 지표 추가 완료", period)
         return df
 
+    def add_ema(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        EMA (Exponential Moving Average) 지표 추가.
+        - ema_20  : 단기 추세 (20봉 = 100분)
+        - ema_50  : 중기 추세 (50봉)
+        - ema_200 : 장기 추세 (200봉 = 16.7시간)
+        """
+        close = df["close"].values.astype(float)
+        df["ema_20"]  = talib.EMA(close, timeperiod=20)
+        df["ema_50"]  = talib.EMA(close, timeperiod=50)
+        df["ema_200"] = talib.EMA(close, timeperiod=200)
+        logger.info("EMA(20/50/200) 지표 추가 완료")
+        return df
+
+    def add_bollinger_bands(self, df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+        """
+        Bollinger Bands 지표 추가.
+        - bb_upper : 상단 밴드 (중심선 + 2σ)
+        - bb_middle: 중심선 (SMA)
+        - bb_lower : 하단 밴드 (중심선 - 2σ)
+        - bb_width : 밴드 폭 (변동성 지표)
+        - bb_pct   : 현재가의 밴드 내 위치 (0~1)
+
+        Parameters
+        ----------
+        period : 이동평균 기간 (기본값 20)
+        """
+        close = df["close"].values.astype(float)
+        upper, middle, lower = talib.BBANDS(close, timeperiod=period, nbdevup=2, nbdevdn=2)
+        df["bb_upper"]  = upper
+        df["bb_middle"] = middle
+        df["bb_lower"]  = lower
+        band_range = np.where((upper - lower) != 0, upper - lower, np.nan)
+        df["bb_width"] = (upper - lower) / np.where(middle != 0, middle, np.nan)
+        df["bb_pct"]   = (close - lower) / np.where(band_range != 0, band_range, np.nan)
+        logger.info("Bollinger Bands(%d) 지표 추가 완료", period)
+        return df
+
+    def add_stochastic(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Stochastic Oscillator 지표 추가.
+        - stoch_k : %K 라인 (0~100) - 현재 가격의 최근 범위 내 위치
+        - stoch_d : %D 라인 (0~100) - %K의 3기간 이동평균 (신호선)
+        """
+        high  = df["high"].values.astype(float)
+        low   = df["low"].values.astype(float)
+        close = df["close"].values.astype(float)
+        slowk, slowd = talib.STOCH(
+            high, low, close,
+            fastk_period=14, slowk_period=3, slowd_period=3,
+        )
+        df["stoch_k"] = slowk
+        df["stoch_d"] = slowd
+        logger.info("Stochastic 지표 추가 완료")
+        return df
+
     # ─────────────────────────────────────────
     # TD Sequential 지표 (Pandas 직접 구현)
     # ─────────────────────────────────────────
@@ -435,6 +491,9 @@ class CryptoDataPreprocessor:
         df = self.add_macd(df)
         df = self.add_rsi(df)
         df = self.add_atr(df)
+        df = self.add_ema(df)
+        df = self.add_bollinger_bands(df)
+        df = self.add_stochastic(df)
         df = self.add_td_sequential(df)
         df = self.remove_nulls(df)
         return df
