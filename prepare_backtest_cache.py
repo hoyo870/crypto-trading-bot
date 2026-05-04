@@ -20,6 +20,7 @@ import os
 import json
 import numpy as np
 import pandas as pd
+import talib
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -75,10 +76,26 @@ def build_cache(symbol: str):
     df['1h_ema_200'] = df['close_raw'].ewm(span=12 * 200, adjust=False).mean()
     df['1h_trend']   = np.where(df['1h_ema_50'] > df['1h_ema_200'], 1, -1)
 
-    # ── 3. 시간 주기 피처 ──────────────────────────────────────
+    # ── 3. 시간 주기 피처 및 캔들 패턴 ──────────────────────────────────────
     dt = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
     df['hour_sin'] = np.sin(2 * np.pi * dt.dt.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * dt.dt.hour / 24)
+
+    o = df['open_raw'].values
+    h = df['high_raw'].values
+    l = df['low_raw'].values
+    c = df['close_raw'].values
+
+    df['pat_doji']         = talib.CDLDOJI(o, h, l, c) / 100.0
+    df['pat_hammer']       = talib.CDLHAMMER(o, h, l, c) / 100.0
+    df['pat_engulfing']    = talib.CDLENGULFING(o, h, l, c) / 100.0
+    df['pat_morningstar']  = talib.CDLMORNINGSTAR(o, h, l, c) / 100.0
+    df['pat_eveningstar']  = talib.CDLEVENINGSTAR(o, h, l, c) / 100.0
+    df['pat_shootingstar'] = talib.CDLSHOOTINGSTAR(o, h, l, c) / 100.0
+    df['pat_hangingman']   = talib.CDLHANGINGMAN(o, h, l, c) / 100.0
+    df['pat_piercing']     = talib.CDLPIERCING(o, h, l, c) / 100.0
+    df['pat_darkcloud']    = talib.CDLDARKCLOUDCOVER(o, h, l, c) / 100.0
+    df['pat_harami']       = talib.CDLHARAMI(o, h, l, c) / 100.0
 
     # ── 4. 원본 가격·날짜 백업 (실제 수익 계산용) ───────────────
     raw_close    = df['close_raw'].values.copy()
@@ -105,10 +122,13 @@ def build_cache(symbol: str):
     raw_close    = raw_close[valid_mask]
     raw_dates_ms = raw_dates_ms[valid_mask]
 
-    # ── 7. 컬럼 순서 정렬 (멀티 브랜치: 가격4 → 거래량1 → 보조지표N) ──
+    # ── 7. 컬럼 순서 정렬 (멀티 브랜치: 가격4 → 거래량1 → 보조지표N → 패턴M) ──
     exclude_cols = ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200']
-    ind_cols     = [c for c in df.columns if c not in price_cols + vol_col + exclude_cols]
-    feature_cols = price_cols + vol_col + ind_cols
+    
+    pat_cols     = [c for c in df.columns if c.startswith('pat_')]
+    ind_cols     = [c for c in df.columns if c not in price_cols + vol_col + exclude_cols + pat_cols]
+    
+    feature_cols = price_cols + vol_col + ind_cols + pat_cols
 
     features = df[feature_cols].values.astype(np.float32)
     val_end  = int(len(features) * 0.85)
@@ -124,11 +144,13 @@ def build_cache(symbol: str):
     meta = {
         'symbol'      : symbol,
         'ind_cols'    : ind_cols,
+        'pat_cols'    : pat_cols,
         'feature_cols': feature_cols,
         'val_end'     : val_end,
         'total_rows'  : len(features),
         'num_features': features.shape[1],
         'num_indicators': len(ind_cols),
+        'num_patterns': len(pat_cols),
     }
     with open(cache_meta, 'w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)

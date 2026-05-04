@@ -5,6 +5,7 @@ import argparse
 import pandas as pd
 import numpy as np
 import torch
+import talib
 import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 
@@ -18,7 +19,7 @@ warnings.filterwarnings('ignore')
 # ─────────────────────────────────────────────────────────────
 # 앙상블 모델 로더 및 예측 함수
 # ─────────────────────────────────────────────────────────────
-def _load_ensemble_models(model_dir, num_models, device):
+def _load_ensemble_models(model_dir, num_models, device, num_indicators, num_patterns):
     """앙상블 디렉토리에서 모델들 로드"""
     models = []
     for i in range(num_models):
@@ -26,8 +27,8 @@ def _load_ensemble_models(model_dir, num_models, device):
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"앙상블 모델을 찾을 수 없습니다: {model_path}")
         
-        # 모델 생성 (num_indicators, num_patterns는 현재 데이터와 일치해야 함)
-        model = MultiBranchCryptoPredictor(num_indicators=19, num_patterns=10, dropout=0.3)
+        # 모델 생성 (동적 meta 기반 설정)
+        model = MultiBranchCryptoPredictor(num_indicators=num_indicators, num_patterns=num_patterns, dropout=0.3)
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.to(device)
         model.eval()
@@ -180,6 +181,7 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
     if cached is not None:
         features, raw_close, raw_dates, meta = cached
         num_indicators = meta['num_indicators']
+        num_patterns   = meta.get('num_patterns', 0)
         val_end        = meta['val_end']
     else:
         print(f"[INFO] 캐시 없음 → 전체 데이터 파이프라인 실행 중 (느림)")
@@ -201,6 +203,22 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
         dt = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df['hour_sin'] = np.sin(2 * np.pi * dt.dt.hour / 24)
         df['hour_cos'] = np.cos(2 * np.pi * dt.dt.hour / 24)
+
+        o = df['open_raw'].values
+        h = df['high_raw'].values
+        l = df['low_raw'].values
+        c = df['close_raw'].values
+
+        df['pat_doji']         = talib.CDLDOJI(o, h, l, c) / 100.0
+        df['pat_hammer']       = talib.CDLHAMMER(o, h, l, c) / 100.0
+        df['pat_engulfing']    = talib.CDLENGULFING(o, h, l, c) / 100.0
+        df['pat_morningstar']  = talib.CDLMORNINGSTAR(o, h, l, c) / 100.0
+        df['pat_eveningstar']  = talib.CDLEVENINGSTAR(o, h, l, c) / 100.0
+        df['pat_shootingstar'] = talib.CDLSHOOTINGSTAR(o, h, l, c) / 100.0
+        df['pat_hangingman']   = talib.CDLHANGINGMAN(o, h, l, c) / 100.0
+        df['pat_piercing']     = talib.CDLPIERCING(o, h, l, c) / 100.0
+        df['pat_darkcloud']    = talib.CDLDARKCLOUDCOVER(o, h, l, c) / 100.0
+        df['pat_harami']       = talib.CDLHARAMI(o, h, l, c) / 100.0
 
         raw_close = df['close_raw'].values.copy()
         raw_dates = dt.values.copy()
@@ -225,11 +243,13 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
         raw_dates = raw_dates[valid_mask]
 
         exclude_cols = ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200']
-        ind_cols     = [c for c in df.columns if c not in price_cols + vol_col + exclude_cols]
-        feature_cols = price_cols + vol_col + ind_cols
+        pat_cols     = [c for c in df.columns if c.startswith('pat_')]
+        ind_cols     = [c for c in df.columns if c not in price_cols + vol_col + exclude_cols + pat_cols]
+        feature_cols = price_cols + vol_col + ind_cols + pat_cols
         features     = df[feature_cols].values.astype(np.float32)
 
         num_indicators = len(ind_cols)
+        num_patterns   = len(pat_cols)
         val_end        = int(len(features) * 0.85)
 
     # ── 2. Test 구간 슬라이싱 ───────────────────────────────────
@@ -242,7 +262,7 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
 
     # ── 3. 모델 로드 ────────────────────────────────────────────
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    model  = MultiBranchCryptoPredictor(num_indicators=num_indicators, dropout=0.3)
+    model  = MultiBranchCryptoPredictor(num_indicators=num_indicators, num_patterns=num_patterns, dropout=0.3)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
@@ -392,6 +412,7 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
     if cached is not None:
         features, raw_close, raw_dates, meta = cached
         num_indicators = meta['num_indicators']
+        num_patterns   = meta.get('num_patterns', 0)
         val_end = meta['val_end']
     else:
         print(f"[INFO] 캐시 없음 → 전체 데이터 파이프라인 실행 중 (느림)")
@@ -452,7 +473,7 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
     print(f"[INFO] 테스트 샘플 수: {len(test_features):,}개")
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    model = MultiBranchCryptoPredictor(num_indicators=num_indicators, dropout=0.3)
+    model = MultiBranchCryptoPredictor(num_indicators=num_indicators, num_patterns=num_patterns, dropout=0.3)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
@@ -467,7 +488,9 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
 
     if use_ensemble:
         # 앙상블 모드
-        ensemble_models = _load_ensemble_models("models/ensemble", ensemble_count, device)
+        # 모델의 폴더 경로로 ensemble 폴더 사용
+        ensemble_dir = os.path.dirname(model_path) if "ensemble" in model_path else "models/ensemble"
+        ensemble_models = _load_ensemble_models(ensemble_dir, ensemble_count, device, num_indicators, num_patterns)
         print(f"[INFO] 앙상블 추론 시작 (모드: {ensemble_mode}, {ensemble_count}개 모델)...")
         
         with torch.no_grad():
