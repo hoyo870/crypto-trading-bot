@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import argparse
 import pandas as pd
 import numpy as np
 import torch
@@ -69,7 +70,7 @@ def _load_cache(data_path: str):
 
 
 def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
-                 batch_size=512):
+                 batch_size=512, tp_pct=0.015, sl_pct=-0.007, max_bars=72):
     """
     Parameters
     ----------
@@ -184,10 +185,7 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
     entry_price = 0.0
     bars_held = 0
 
-    # 배리어 설정 (단순화를 위해 백테스트에서는 고정폭 사용)
-    tp_pct = 0.015    # 익절 (+1.5%)
-    sl_pct = -0.007   # 손절 (-0.7%)
-    max_bars = 72     # 타임아웃 6시간
+    # 배리어 설정
     fee_rate = 0.0005 # 시장가 수수료 0.05%
 
     for i in range(len(predictions)):
@@ -287,11 +285,275 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
     plt.savefig("backtest_v4_result.png", dpi=300)
     print("[INFO] 📈 결과 차트가 'backtest_v4_result.png' 파일로 저장되었습니다!")
 
+
+def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.35,
+                       batch_size=512, tp_pct=0.015, sl_pct=-0.005,
+                       horizon=72, max_log_lines=80, exclude_timeout_sample=True):
+    """
+    실제 매매 없이 모델 신호의 승/패만 추적하는 리포트 모드.
+    - 신호 발생 조건: long_prob 또는 short_prob >= threshold_prob
+    - 결과 판정: horizon 내 TP/SL 선터치 우선, 미터치 시 horizon 종료 수익률 부호로 판정
+    """
+    cached = _load_cache(data_path)
+
+    if cached is not None:
+        features, raw_close, raw_dates, meta = cached
+        num_indicators = meta['num_indicators']
+        val_end = meta['val_end']
+    else:
+        print(f"[INFO] 캐시 없음 → 전체 데이터 파이프라인 실행 중 (느림)")
+        print(f"[INFO] 다음엔 먼저 'python prepare_backtest_cache.py' 를 실행하세요.")
+
+        df = pd.read_csv(data_path)
+        if 'atr' in df.columns:
+            df.drop(columns=['atr'], inplace=True)
+
+        raw_filepath = data_path.replace("_processed.csv", "_5m_raw.csv")
+        df_raw = pd.read_csv(raw_filepath)
+        df = pd.merge(df, df_raw[['timestamp', 'open', 'high', 'low', 'close', 'volume']],
+                      on='timestamp', suffixes=('', '_raw'))
+
+        df['1h_ema_50'] = df['close_raw'].ewm(span=12 * 50, adjust=False).mean()
+        df['1h_ema_200'] = df['close_raw'].ewm(span=12 * 200, adjust=False).mean()
+        df['1h_trend'] = np.where(df['1h_ema_50'] > df['1h_ema_200'], 1, -1)
+
+        dt = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+        df['hour_sin'] = np.sin(2 * np.pi * dt.dt.hour / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * dt.dt.hour / 24)
+
+        raw_close = df['close_raw'].values.copy()
+        raw_dates = dt.values.copy()
+
+        price_cols = ['open', 'high', 'low', 'close']
+        for col in price_cols:
+            df[col] = df[f'{col}_raw'].pct_change().fillna(0)
+            q_lo, q_hi = df[col].quantile(0.001), df[col].quantile(0.999)
+            df[col] = df[col].clip(q_lo, q_hi)
+
+        vol_col = ['volume']
+        vol_ma = df['volume_raw'].rolling(24).mean() + 1e-9
+        df[vol_col[0]] = (df['volume_raw'] / vol_ma).clip(0, 10)
+
+        drop_cols = [c for c in df.columns if c.endswith('_raw')]
+        df.drop(columns=drop_cols, inplace=True)
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        valid_mask = df.notna().all(axis=1).values
+        df = df[valid_mask]
+        raw_close = raw_close[valid_mask]
+        raw_dates = raw_dates[valid_mask]
+
+        exclude_cols = ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200']
+        ind_cols = [c for c in df.columns if c not in price_cols + vol_col + exclude_cols]
+        feature_cols = price_cols + vol_col + ind_cols
+        features = df[feature_cols].values.astype(np.float32)
+
+        num_indicators = len(ind_cols)
+        val_end = int(len(features) * 0.85)
+
+    test_features = features[val_end:]
+    test_close = raw_close[val_end:]
+    test_dates = raw_dates[val_end:]
+
+    print(f"[INFO] 신호 추적 기간: {pd.to_datetime(test_dates[0])} ~ {pd.to_datetime(test_dates[-1])}")
+    print(f"[INFO] 테스트 샘플 수: {len(test_features):,}개")
+
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    model = MultiBranchCryptoPredictor(num_indicators=num_indicators, dropout=0.3)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+
+    print(f"[INFO] 배치 추론 시작 (batch_size={batch_size}, device={device})...")
+    t_infer = time.time()
+    dataset = SlidingWindowDataset(test_features, seq_length)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
+    predictions = []
+
+    with torch.no_grad():
+        for batch in loader:
+            batch = batch.to(device)
+            probs = torch.softmax(model(batch), dim=1).cpu().numpy()
+            predictions.extend(probs)
+
+    print(f"[INFO] 추론 완료 — {len(predictions):,}개 예측 ({time.time()-t_infer:.1f}초)")
+    print(f"[INFO] 신호 조건: prob >= {threshold_prob:.2f}, TP={tp_pct*100:.2f}%, SL={sl_pct*100:.2f}%, horizon={horizon} bars")
+
+    signal_logs = []
+    long_total = 0
+    short_total = 0
+    long_win = 0
+    short_win = 0
+
+    for i, probs in enumerate(predictions):
+        entry_idx = i + seq_length
+        if entry_idx >= len(test_close):
+            break
+
+        long_prob = float(probs[1])
+        short_prob = float(probs[2])
+
+        signal_type = None
+        signal_prob = 0.0
+
+        if long_prob >= threshold_prob and long_prob >= short_prob:
+            signal_type = 'Long'
+            signal_prob = long_prob
+        elif short_prob >= threshold_prob and short_prob > long_prob:
+            signal_type = 'Short'
+            signal_prob = short_prob
+
+        if signal_type is None:
+            continue
+
+        entry_price = float(test_close[entry_idx])
+        entry_date = pd.to_datetime(test_dates[entry_idx])
+        end_idx = min(entry_idx + horizon, len(test_close) - 1)
+
+        outcome = 'LOSS'
+        reason = 'SL/음수 종료'
+        realized_ret = 0.0
+        exit_idx = end_idx
+
+        for j in range(entry_idx + 1, end_idx + 1):
+            price_j = float(test_close[j])
+            if signal_type == 'Long':
+                ret = (price_j - entry_price) / entry_price
+            else:
+                ret = (entry_price - price_j) / entry_price
+
+            if ret >= tp_pct:
+                outcome = 'WIN'
+                reason = 'TP 선터치'
+                realized_ret = ret
+                exit_idx = j
+                break
+            if ret <= sl_pct:
+                outcome = 'LOSS'
+                reason = 'SL 선터치'
+                realized_ret = ret
+                exit_idx = j
+                break
+        else:
+            final_price = float(test_close[end_idx])
+            if signal_type == 'Long':
+                realized_ret = (final_price - entry_price) / entry_price
+            else:
+                realized_ret = (entry_price - final_price) / entry_price
+            if realized_ret > 0:
+                outcome = 'WIN'
+                reason = '시간종료 양수'
+
+        bars_held = exit_idx - entry_idx
+        exit_date = pd.to_datetime(test_dates[exit_idx])
+
+        signal_logs.append({
+            'entry_date': entry_date,
+            'type': signal_type,
+            'prob': signal_prob,
+            'outcome': outcome,
+            'ret_pct': realized_ret * 100,
+            'bars': bars_held,
+            'reason': reason,
+            'exit_date': exit_date,
+        })
+
+        if signal_type == 'Long':
+            long_total += 1
+            if outcome == 'WIN':
+                long_win += 1
+        else:
+            short_total += 1
+            if outcome == 'WIN':
+                short_win += 1
+
+    total_signals = len(signal_logs)
+    long_loss = long_total - long_win
+    short_loss = short_total - short_win
+    total_win = long_win + short_win
+    total_loss = total_signals - total_win
+
+    long_wr = (long_win / long_total * 100) if long_total else 0.0
+    short_wr = (short_win / short_total * 100) if short_total else 0.0
+    total_wr = (total_win / total_signals * 100) if total_signals else 0.0
+
+    print("\n========================================")
+    print("📡 신호 추적 리포트 (매매 미실행)")
+    print("========================================")
+    print(f"총 신호 횟수 : {total_signals:>5}회")
+    print(f"전체 적중률  : {total_wr:>6.2f}%  ({total_win}승 / {total_loss}패)")
+    print("----------------------------------------")
+    print(f"[Long ]  총 {long_total:>4}회  |  적중률 {long_wr:>6.2f}%  |  {long_win}승 / {long_loss}패")
+    print(f"[Short]  총 {short_total:>4}회  |  적중률 {short_wr:>6.2f}%  |  {short_win}승 / {short_loss}패")
+    print("========================================")
+
+    if total_signals == 0:
+        print("[INFO] 조건을 만족하는 신호가 없습니다. threshold_prob를 낮춰보세요.")
+        return
+
+    sample_logs = signal_logs
+    if exclude_timeout_sample:
+        sample_logs = [r for r in signal_logs if not str(r['reason']).startswith('시간종료')]
+        filtered_count = len(signal_logs) - len(sample_logs)
+        print(f"[INFO] 시간종료 샘플 필터 적용: {filtered_count}건 제외")
+
+    print(f"\n[INFO] 신호 로그 샘플 (최대 {max_log_lines}건)")
+    print("date                | type  | prob   | result | ret%    | bars | reason")
+    print("------------------------------------------------------------------------")
+    for row in sample_logs[:max_log_lines]:
+        print(
+            f"{row['entry_date']} | "
+            f"{row['type']:<5} | "
+            f"{row['prob']*100:>5.2f}% | "
+            f"{row['outcome']:<6} | "
+            f"{row['ret_pct']:>+7.3f}% | "
+            f"{row['bars']:>4} | "
+            f"{row['reason']}"
+        )
+
 if __name__ == "__main__":
-    run_backtest(
-        data_path="data/BTC_USDT_processed.csv",
-        model_path="models/best_lstm_btc_5m_multibranch_v4.pth",
-        seq_length=120,
-        # 🌟 안전장치: AI의 롱/숏 확신이 35%를 넘을 때만 진입 (기본값)
-        threshold_prob=0.35 
-    )
+    parser = argparse.ArgumentParser(description="Crypto backtest / signal tracker runner")
+    parser.add_argument("--mode", choices=["backtest", "signal", "both"], default="both")
+    parser.add_argument("--data-path", default="data/BTC_USDT_processed.csv")
+    parser.add_argument("--model-path", default="models/best_lstm_btc_5m_multibranch_v4.pth")
+    parser.add_argument("--seq-length", type=int, default=120)
+    parser.add_argument("--threshold", type=float, default=0.35)
+    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--tp-pct", type=float, default=0.045,
+                        help="Take profit ratio. e.g. 0.045 = 4.5%")
+    parser.add_argument("--sl-pct", type=float, default=-0.015,
+                        help="Stop loss ratio. e.g. -0.015 = -1.5%")
+    parser.add_argument("--horizon", type=int, default=72,
+                        help="Maximum holding bars / signal evaluation horizon")
+    parser.add_argument("--max-log-lines", type=int, default=80)
+    parser.add_argument("--keep-timeout-sample", action="store_true",
+                        help="Keep '시간종료' rows in signal sample log (default: excluded)")
+    args = parser.parse_args()
+
+    if args.mode in ["backtest", "both"]:
+        print("\n================ BACKTEST LOG ================")
+        run_backtest(
+            data_path=args.data_path,
+            model_path=args.model_path,
+            seq_length=args.seq_length,
+            threshold_prob=args.threshold,
+            batch_size=args.batch_size,
+            tp_pct=args.tp_pct,
+            sl_pct=args.sl_pct,
+            max_bars=args.horizon,
+        )
+
+    if args.mode in ["signal", "both"]:
+        print("\n================ SIGNAL LOG ==================")
+        run_signal_tracker(
+            data_path=args.data_path,
+            model_path=args.model_path,
+            seq_length=args.seq_length,
+            threshold_prob=args.threshold,
+            batch_size=args.batch_size,
+            tp_pct=args.tp_pct,
+            sl_pct=args.sl_pct,
+            horizon=args.horizon,
+            max_log_lines=args.max_log_lines,
+            exclude_timeout_sample=not args.keep_timeout_sample,
+        )
