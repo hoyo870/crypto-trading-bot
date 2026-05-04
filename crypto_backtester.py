@@ -414,9 +414,16 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
         reason = 'SL/음수 종료'
         realized_ret = 0.0
         exit_idx = end_idx
+        
+        # MFE/MAE 계산용 가격 추적
+        max_price = entry_price
+        min_price = entry_price
 
         for j in range(entry_idx + 1, end_idx + 1):
             price_j = float(test_close[j])
+            max_price = max(max_price, price_j)
+            min_price = min(min_price, price_j)
+            
             if signal_type == 'Long':
                 ret = (price_j - entry_price) / entry_price
             else:
@@ -443,6 +450,14 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
             if realized_ret > 0:
                 outcome = 'WIN'
                 reason = '시간종료 양수'
+        
+        # MFE/MAE 계산
+        if signal_type == 'Long':
+            mfe = (max_price - entry_price) / entry_price
+            mae = (min_price - entry_price) / entry_price
+        else:
+            mfe = (entry_price - min_price) / entry_price
+            mae = (entry_price - max_price) / entry_price
 
         bars_held = exit_idx - entry_idx
         exit_date = pd.to_datetime(test_dates[exit_idx])
@@ -456,6 +471,8 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
             'bars': bars_held,
             'reason': reason,
             'exit_date': exit_date,
+            'mfe_pct': mfe * 100,
+            'mae_pct': mae * 100,
         })
 
         if signal_type == 'Long':
@@ -501,15 +518,17 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
         f.write(f"신호 조건: prob >= {threshold_prob:.2f}, TP={tp_pct*100:.2f}%, SL={sl_pct*100:.2f}%, horizon={horizon} bars\n")
         f.write(f"\n총 신호 {total_signals}건 | 적중률 {total_wr:.2f}%\n")
         f.write(f"Long: {long_total}건 ({long_wr:.2f}%) | Short: {short_total}건 ({short_wr:.2f}%)\n")
-        f.write("\n" + "="*90 + "\n")
-        f.write("date                | type  | prob   | result | ret%    | bars | reason\n")
-        f.write("-"*90 + "\n")
+        f.write("\n" + "="*120 + "\n")
+        f.write("date                | type  | prob   | MFE%    | MAE%    | result | ret%    | bars | reason\n")
+        f.write("-"*120 + "\n")
         
         for row in signal_logs:
             f.write(
                 f"{row['entry_date']} | "
                 f"{row['type']:<5} | "
                 f"{row['prob']*100:>5.2f}% | "
+                f"{row['mfe_pct']:>+7.3f}% | "
+                f"{row['mae_pct']:>+7.3f}% | "
                 f"{row['outcome']:<6} | "
                 f"{row['ret_pct']:>+7.3f}% | "
                 f"{row['bars']:>4} | "
