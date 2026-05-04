@@ -162,5 +162,5 @@ if __name__ == "__main__":
         data_path="data/BTC_USDT_processed.csv",
         model_path="models/best_lstm_btc_5m.pth",
         seq_length=120,
-        threshold=0.35 # 학습 결과에서 제시된 최적 임계값
+        threshold=0.15 # 학습 결과에서 제시된 최적 임계값
     )
