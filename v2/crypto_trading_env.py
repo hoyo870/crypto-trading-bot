@@ -11,6 +11,8 @@ HOLD_BASE_STEPS = 288    # 보유 패널티 시작: 24시간
 SHARPE_WINDOW   = 50     # Sharpe 계산용 최근 거래 수
 DD_THRESHOLD    = 0.10   # 드로우다운 패널티 발동 기준: -10%
 MIN_EP_STEPS    = 10_000 # 에피소드 최소 잔여 스텝 (랜덤 시작 상한)
+MAX_EP_STEPS    = 20_000 # 에피소드 최대 길이 (약 70일): 보상 누적 폭발 방지
+REWARD_CLIP     = 10.0   # per-step 보상 클리핑 범위
 # ────────────────────────────────────────────────────────────────
 
 
@@ -170,15 +172,20 @@ class CryptoTradingEnv(gym.Env):
                     reward = base_penalty
 
         # ⑤ 드로우다운 패널티: peak 대비 -10% 초과 시 초과분에 비례
+        #    계수 0.01: 20% DD → 0.001/step, 20,000스텝 × 0.001 = 20 (매우 약한 패널티)
         drawdown = (self.peak_balance - self.balance) / (self.peak_balance + 1e-8)
         if drawdown > DD_THRESHOLD:
-            reward -= (drawdown - DD_THRESHOLD) * 10.0
+            reward -= (drawdown - DD_THRESHOLD) * 0.01
+
+        # ⑥ per-step 보상 클리핑: 이상치 방지 (critic 안정화)
+        reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 
         self.current_step += 1
+        ep_steps = self.current_step - self.start_step
 
         if self.balance <= 0:
             terminated = True
-        if self.current_step >= self.max_steps:
+        if self.current_step >= self.max_steps or ep_steps >= MAX_EP_STEPS:
             truncated = True
 
         if terminated or truncated:
