@@ -111,11 +111,11 @@ def train_commander(total_timesteps=3000000,
         print("[ERROR] base_signals_log.csv 파일이 없습니다. validate_base_signals.py를 먼저 실행하세요.")
         return
 
-    # 환경 생성 (훈련용)
-    env = CryptoTradingEnv(data_path=data_path, mode='train')
-    
-    # 평가 환경 생성 (가끔씩 시험을 보며 똑똑해지는지 체크)
-    eval_env = CryptoTradingEnv(data_path=data_path, mode='test')
+    # 환경 생성 (훈련용: 랜덤 시작점으로 전체 기간 탐색)
+    env = CryptoTradingEnv(data_path=data_path)
+
+    # 평가 환경 생성 (훈련 env와 동일 전체 데이터, 랜덤 시작 → 일반화 측정)
+    eval_env = CryptoTradingEnv(data_path=data_path)
 
     # 사령관의 뇌(Policy) 구조: 은닉층 128, 64의 신경망
     policy_kwargs = dict(net_arch=[128, 64])
