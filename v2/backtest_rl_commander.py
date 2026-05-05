@@ -1,7 +1,13 @@
 import os
+import sys
 import pandas as pd
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 from crypto_trading_env import CryptoTradingEnv
 import warnings
 warnings.filterwarnings('ignore')
@@ -11,8 +17,8 @@ def run_rl_backtest():
     print(f"📈 3차 사령관 (RL Commander) 실전 백테스트 시작")
     print(f"{'='*50}")
 
-    model_path = "models/rl_commander/best_model.zip"
-    data_path = "data/base_signals_log.csv"
+    model_path = os.path.join(BASE_DIR, "models", "rl_commander", "best_model.zip")
+    data_path = os.path.join(BASE_DIR, "data", "base_signals_log.csv")
 
     if not os.path.exists(model_path):
         print("[ERROR] best_model.zip 파일이 없습니다. 훈련이 정상적으로 완료되었는지 확인하세요.")
@@ -89,7 +95,7 @@ def run_rl_backtest():
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
     
-    save_fig_path = "rl_backtest_result.png"
+    save_fig_path = os.path.join(BASE_DIR, "rl_backtest_result.png")
     plt.tight_layout()
     plt.savefig(save_fig_path, dpi=300)
     print(f"\n[INFO] 📈 결과 차트가 '{save_fig_path}' 파일로 저장되었습니다!")
