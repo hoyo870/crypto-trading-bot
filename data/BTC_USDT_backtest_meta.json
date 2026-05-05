@@ -21,6 +21,18 @@
     "hour_sin",
     "hour_cos"
   ],
+  "pat_cols": [
+    "pat_doji",
+    "pat_hammer",
+    "pat_engulfing",
+    "pat_morningstar",
+    "pat_eveningstar",
+    "pat_shootingstar",
+    "pat_hangingman",
+    "pat_piercing",
+    "pat_darkcloud",
+    "pat_harami"
+  ],
   "feature_cols": [
     "open",
     "high",
@@ -45,10 +57,21 @@
     "td_sell_setup",
     "1h_trend",
     "hour_sin",
-    "hour_cos"
+    "hour_cos",
+    "pat_doji",
+    "pat_hammer",
+    "pat_engulfing",
+    "pat_morningstar",
+    "pat_eveningstar",
+    "pat_shootingstar",
+    "pat_hangingman",
+    "pat_piercing",
+    "pat_darkcloud",
+    "pat_harami"
   ],
   "val_end": 267899,
   "total_rows": 315176,
-  "num_features": 24,
-  "num_indicators": 19
+  "num_features": 34,
+  "num_indicators": 19,
+  "num_patterns": 10
 }
