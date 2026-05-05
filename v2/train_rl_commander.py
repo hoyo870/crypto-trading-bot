@@ -8,51 +8,68 @@ from crypto_trading_env import CryptoTradingEnv
 class SmartStopCallback(BaseCallback):
     """
     3가지 조건으로 자동 학습 종료:
-    1. Early Stopping : eval reward가 patience 횟수 연속 개선 없으면 종료
-    2. 정책 퇴화 감지 : entropy_loss가 entropy_threshold 이하로 내려가면 종료
-    3. 목표 달성     : eval reward가 reward_target 이상이면 종료
+    1. Early Stopping : eval reward가 patience 횟수(eval 단위) 연속 개선 없으면 종료
+    2. 정책 퇴화 감지 : entropy_loss > entropy_threshold 이면 종료 (0에 수렴 = 퇴화)
+    3. 목표 달성     : eval reward >= reward_target 이면 종료
     """
     def __init__(self, eval_callback,
                  patience=10,
+                 eval_freq=10000,
                  entropy_threshold=-0.01,
                  reward_target=50.0,
                  verbose=1):
         super().__init__(verbose)
         self.eval_callback = eval_callback
         self.patience = patience
+        self.eval_freq = eval_freq          # EvalCallback과 동일하게 맞춰야 함
         self.entropy_threshold = entropy_threshold
         self.reward_target = reward_target
         self._no_improve_count = 0
         self._best_reward = -np.inf
 
     def _on_step(self) -> bool:
-        # ── 1. eval reward 기반 Early Stopping ──────────────────────────
+        # ── 3. 정책 퇴화 감지 (매 스텝 체크 — 즉각 반응 필요) ──────────
+        entropy = self.logger.name_to_value.get("train/entropy_loss", None)
+        if entropy is not None and entropy > self.entropy_threshold:
+            if self.verbose:
+                print(f"\n[SmartStop] 💀 정책 퇴화 감지: entropy_loss={entropy:.6f} "
+                      f"> {self.entropy_threshold} → 종료")
+            return False
+
+        # ── eval_freq 스텝마다만 patience/목표 체크 ──────────────────────
+        # n_calls는 1부터 시작하므로, eval_freq 배수일 때만 평가
+        if self.n_calls % self.eval_freq != 0:
+            return True
+
         current_best = self.eval_callback.best_mean_reward
+
+        # EvalCallback이 아직 한 번도 평가 안 했으면 스킵
+        if current_best == -np.inf:
+            return True
+
+        # ── 1. Early Stopping ────────────────────────────────────────────
         if current_best > self._best_reward:
             self._best_reward = current_best
             self._no_improve_count = 0
+            if self.verbose:
+                print(f"[SmartStop] ✅ 개선됨: best_reward={self._best_reward:.2f}")
         else:
             self._no_improve_count += 1
+            if self.verbose:
+                print(f"[SmartStop] ⚠️  개선 없음 {self._no_improve_count}/{self.patience} "
+                      f"(best={self._best_reward:.2f})")
 
         if self._no_improve_count >= self.patience:
             if self.verbose:
                 print(f"\n[SmartStop] ⏹  Early Stopping: {self.patience}회 연속 개선 없음 "
                       f"(best={self._best_reward:.2f})")
-            return False  # 훈련 중단
+            return False
 
         # ── 2. 목표 달성 ─────────────────────────────────────────────────
         if self._best_reward >= self.reward_target:
             if self.verbose:
                 print(f"\n[SmartStop] 🎯 목표 달성! eval reward={self._best_reward:.2f} "
                       f">= {self.reward_target}")
-            return False
-
-        # ── 3. 정책 퇴화 감지 (entropy) ─────────────────────────────────
-        entropy = self.logger.name_to_value.get("train/entropy_loss", None)
-        if entropy is not None and entropy > self.entropy_threshold:
-            if self.verbose:
-                print(f"\n[SmartStop] 💀 정책 퇴화 감지: entropy_loss={entropy:.6f} "
-                      f"> {self.entropy_threshold} → 종료")
             return False
 
         return True  # 계속 훈련
@@ -96,9 +113,10 @@ def train_commander():
 
     smart_stop = SmartStopCallback(
         eval_callback=eval_callback,
-        patience=10,           # eval 10회(=100,000 스텝) 연속 개선 없으면 종료
+        patience=10,              # eval 10회(=100,000 스텝) 연속 개선 없으면 종료
+        eval_freq=10000,          # EvalCallback의 eval_freq와 반드시 동일하게
         entropy_threshold=-0.01,  # entropy_loss > -0.01 이면 퇴화로 판단
-        reward_target=50.0,    # eval reward 50 이상이면 목표 달성으로 종료
+        reward_target=50.0,       # eval reward 50 이상이면 목표 달성으로 종료
     )
 
     # 훈련 (50만 번의 틱을 보면서 학습)
