@@ -37,7 +37,7 @@ def train_commander():
 
     # 훈련 (10만 번의 틱을 보면서 학습)
     print("[INFO] 강도 높은 실전 훈련에 돌입합니다...")
-    model.learn(total_timesteps=100000, callback=eval_callback)
+    model.learn(total_timesteps=1000000, callback=eval_callback)
 
     print(f"\n🎉 훈련이 완료되었습니다! 최고 성능의 사령관이 {os.path.join(model_dir, 'best_model.zip')} 에 저장되었습니다.")
 

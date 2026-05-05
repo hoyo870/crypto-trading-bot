@@ -6,15 +6,13 @@ from crypto_trading_env import CryptoTradingEnv
 import warnings
 warnings.filterwarnings('ignore')
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 def run_rl_backtest():
     print(f"\n{'='*50}")
     print(f"📈 3차 사령관 (RL Commander) 실전 백테스트 시작")
     print(f"{'='*50}")
 
-    model_path = os.path.join(BASE_DIR, "models", "rl_commander", "best_model.zip")
-    data_path = os.path.join(BASE_DIR, "data", "base_signals_log.csv")
+    model_path = "models/rl_commander/best_model.zip"
+    data_path = "data/base_signals_log.csv"
 
     if not os.path.exists(model_path):
         print("[ERROR] best_model.zip 파일이 없습니다. 훈련이 정상적으로 완료되었는지 확인하세요.")
@@ -27,7 +25,11 @@ def run_rl_backtest():
     print("[INFO] 최고 성능의 사령관 뇌를 이식 중...")
     model = PPO.load(model_path)
 
-    obs, _ = env.reset()
+    # 🚨 핵심 패치 1: 리셋 시 튜플(Gymnasium) 반환 안전 처리
+    obs = env.reset()
+    if isinstance(obs, tuple):
+        obs = obs[0]
+
     done = False
     
     # 기록용 리스트
@@ -39,14 +41,23 @@ def run_rl_backtest():
     while not done:
         # 사령관의 예측 (결정론적 행동 선택)
         action, _states = model.predict(obs, deterministic=True)
-        obs, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
+        
+        # 🚨 핵심 패치 2: 스텝 진행 시 Gym(4개) vs Gymnasium(5개) 반환값 호환
+        step_result = env.step(action)
+        if len(step_result) == 4:
+            obs, reward, done, info = step_result
+        else:
+            obs, reward, terminated, truncated, info = step_result
+            done = terminated or truncated
         
         balances.append(env.balance)
         
+        # SB3 예측 결과가 배열일 수 있으므로 정수형(int) 스칼라로 변환
+        act_val = int(action) if action.ndim == 0 else int(action[0])
+        
         # 1: Long, 2: Short (의미 있는 행동만 기록)
-        if action in [1, 2]:
-            actions_taken.append(action)
+        if act_val in [1, 2]:
+            actions_taken.append(act_val)
 
     # 3. 결과 요약
     final_balance = info['final_balance']
@@ -78,7 +89,7 @@ def run_rl_backtest():
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
     
-    save_fig_path = os.path.join(BASE_DIR, "rl_backtest_result.png")
+    save_fig_path = "rl_backtest_result.png"
     plt.tight_layout()
     plt.savefig(save_fig_path, dpi=300)
     print(f"\n[INFO] 📈 결과 차트가 '{save_fig_path}' 파일로 저장되었습니다!")
