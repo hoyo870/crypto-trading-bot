@@ -76,7 +76,8 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512):
     context_cols = [c for c in df.columns if c not in price_vol_cols + exclude_cols]
 
     # Test 구간(마지막 15%)만 추출
-    val_end = int(len(df) * 0.85)
+    # val_end = int(len(df) * 0.85)
+    val_end = 0
     
     test_pv_features = df[price_vol_cols].values.astype(np.float32)[val_end:]
     test_ctx_features = df[context_cols].values.astype(np.float32)[val_end:]
