@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
@@ -12,16 +13,38 @@ from crypto_trading_env import CryptoTradingEnv
 import warnings
 warnings.filterwarnings('ignore')
 
-def run_rl_backtest():
+
+def _resolve_model_path(model_path=None, model_tag=None):
+    model_dir = os.path.join(BASE_DIR, "models", "rl_commander")
+    if model_path is not None:
+        if not os.path.isabs(model_path):
+            model_path = os.path.join(BASE_DIR, model_path)
+        return model_path
+
+    if model_tag:
+        tag = model_tag[:-4] if model_tag.endswith(".zip") else model_tag
+        candidates_path = os.path.join(model_dir, "candidates", f"{tag}.zip")
+        legacy_path = os.path.join(model_dir, f"{tag}.zip")
+        if os.path.exists(candidates_path):
+            return candidates_path
+        if os.path.exists(legacy_path):
+            return legacy_path
+        return candidates_path
+
+    return os.path.join(model_dir, "best_model.zip")
+
+
+def run_rl_backtest(model_path=None, model_tag=None, output_suffix=""):
     print(f"\n{'='*50}")
     print(f"📈 3차 사령관 (RL Commander) 실전 백테스트 시작")
     print(f"{'='*50}")
 
-    model_path = os.path.join(BASE_DIR, "models", "rl_commander", "best_model.zip")
+    model_path = _resolve_model_path(model_path=model_path, model_tag=model_tag)
+
     data_path = os.path.join(BASE_DIR, "data", "base_signals_log.csv")
 
     if not os.path.exists(model_path):
-        print("[ERROR] best_model.zip 파일이 없습니다. 훈련이 정상적으로 완료되었는지 확인하세요.")
+        print(f"[ERROR] 모델 파일이 없습니다: {model_path}")
         return
 
     # 1. 평가용 환경 로드 (Test 데이터 구간)
@@ -40,13 +63,15 @@ def run_rl_backtest():
     
     # 기록용 리스트
     balances = [env.balance]
-    actions_taken = []
+    entry_actions = []
 
     print("[INFO] 백테스트 시뮬레이션 가동 중...")
     
     while not done:
         # 사령관의 예측 (결정론적 행동 선택)
         action, _states = model.predict(obs, deterministic=True)
+        act_val = int(action) if action.ndim == 0 else int(action[0])
+        can_enter = (env.position == 0)
         
         # 🚨 핵심 패치 2: 스텝 진행 시 Gym(4개) vs Gymnasium(5개) 반환값 호환
         step_result = env.step(action)
@@ -57,13 +82,10 @@ def run_rl_backtest():
             done = terminated or truncated
         
         balances.append(env.balance)
-        
-        # SB3 예측 결과가 배열일 수 있으므로 정수형(int) 스칼라로 변환
-        act_val = int(action) if action.ndim == 0 else int(action[0])
-        
-        # 1: Long, 2: Short (의미 있는 행동만 기록)
-        if act_val in [1, 2]:
-            actions_taken.append(act_val)
+
+        # 실제 진입이 가능한 상태에서 발생한 진입 행동만 기록
+        if can_enter and act_val in [1, 2]:
+            entry_actions.append(act_val)
 
     # 3. 결과 요약
     final_balance = info['final_balance']
@@ -71,8 +93,8 @@ def run_rl_backtest():
     total_trades = info['total_trades']
     win_rate = info.get('win_rate', 0.0)
 
-    long_count = actions_taken.count(1)
-    short_count = actions_taken.count(2)
+    long_count = entry_actions.count(1)
+    short_count = entry_actions.count(2)
 
     print("\n========================================")
     print("📊 강화학습 사령관 백테스트 결과 리포트")
@@ -95,10 +117,28 @@ def run_rl_backtest():
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
     
-    save_fig_path = os.path.join(BASE_DIR, "rl_backtest_result.png")
+    if not output_suffix and model_tag:
+        output_suffix = model_tag
+
+    if output_suffix:
+        save_name = f"rl_backtest_result_{output_suffix}.png"
+    else:
+        save_name = "rl_backtest_result.png"
+    save_fig_path = os.path.join(BASE_DIR, save_name)
     plt.tight_layout()
     plt.savefig(save_fig_path, dpi=300)
     print(f"\n[INFO] 📈 결과 차트가 '{save_fig_path}' 파일로 저장되었습니다!")
 
 if __name__ == "__main__":
-    run_rl_backtest()
+    parser = argparse.ArgumentParser(description="Backtest RL commander with selected model")
+    parser.add_argument("--model-path", type=str, default=None,
+                        help="Absolute path or v2-relative path of RL model zip")
+    parser.add_argument("--model-tag", type=str, default=None,
+                        help="Short tag in models/rl_commander/candidates, e.g. m001")
+    parser.add_argument("--suffix", type=str, default="",
+                        help="Output image suffix. e.g. seed42")
+    args = parser.parse_args()
+
+    run_rl_backtest(model_path=args.model_path,
+                    model_tag=args.model_tag,
+                    output_suffix=args.suffix)

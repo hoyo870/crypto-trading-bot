@@ -1,4 +1,7 @@
+import argparse
 import os
+import re
+import shutil
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
@@ -76,7 +79,28 @@ class SmartStopCallback(BaseCallback):
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def train_commander():
+
+def _normalize_tag(tag):
+    clean = re.sub(r"[^a-zA-Z0-9_-]", "", str(tag)).lower()
+    return clean or None
+
+
+def _next_model_tag(candidates_dir):
+    max_idx = 0
+    if os.path.isdir(candidates_dir):
+        for name in os.listdir(candidates_dir):
+            m = re.fullmatch(r"m(\d{3})\.zip", name)
+            if m:
+                max_idx = max(max_idx, int(m.group(1)))
+    return f"m{max_idx + 1:03d}"
+
+def train_commander(total_timesteps=3000000,
+                    eval_freq=10000,
+                    patience=10,
+                    reward_target=None,
+                    entropy_threshold=-0.01,
+                    seed=42,
+                    model_tag=None):
     print(f"\n{'='*50}")
     print(f"🚀 3차 사령관 (RL Commander) 훈련 시작")
     print(f"{'='*50}")
@@ -102,28 +126,73 @@ def train_commander():
                 ent_coef=0.01,        # 탐험 강제 → 정책 퇴화 방지
                 vf_coef=0.5,          # 가치함수 학습 가중치
                 n_steps=2048,
-                batch_size=64)
+                batch_size=64,
+                seed=seed)
 
-    # 최고 성과를 낼 때마다 모델을 저장하는 콜백
+    # 저장 경로: runs/<tag>/best_model.zip + candidates/<tag>.zip
     model_dir = os.path.join(BASE_DIR, "models", "rl_commander")
-    os.makedirs(model_dir, exist_ok=True)
-    eval_callback = EvalCallback(eval_env, best_model_save_path=model_dir,
-                                 log_path=model_dir, eval_freq=10000,
+    runs_dir = os.path.join(model_dir, "runs")
+    candidates_dir = os.path.join(model_dir, "candidates")
+    os.makedirs(runs_dir, exist_ok=True)
+    os.makedirs(candidates_dir, exist_ok=True)
+
+    requested_tag = _normalize_tag(model_tag) if model_tag else None
+    if model_tag and requested_tag is None:
+        requested_tag = _next_model_tag(candidates_dir)
+        print(f"[WARN] 유효하지 않은 --tag 입니다. 자동 태그로 대체: {requested_tag}")
+
+    final_tag = requested_tag or _next_model_tag(candidates_dir)
+    run_dir = os.path.join(runs_dir, final_tag)
+    os.makedirs(run_dir, exist_ok=True)
+
+    eval_callback = EvalCallback(eval_env, best_model_save_path=run_dir,
+                                 log_path=run_dir, eval_freq=eval_freq,
                                  deterministic=True, render=False)
 
     smart_stop = SmartStopCallback(
         eval_callback=eval_callback,
-        patience=10,              # eval 10회(=100,000 스텝) 연속 개선 없으면 종료
-        eval_freq=10000,          # EvalCallback의 eval_freq와 반드시 동일하게
-        entropy_threshold=-0.01,  # entropy_loss > -0.01 이면 퇴화로 판단
-        reward_target=50.0,       # eval reward 50 이상이면 목표 달성으로 종료
+        patience=patience,            # eval 연속 개선 없으면 종료
+        eval_freq=eval_freq,          # EvalCallback의 eval_freq와 반드시 동일하게
+        entropy_threshold=entropy_threshold,
+        reward_target=(float("inf") if reward_target is None else reward_target),
     )
 
-    # 훈련 (50만 번의 틱을 보면서 학습)
+    # 훈련
     print("[INFO] 강도 높은 실전 훈련에 돌입합니다...")
-    model.learn(total_timesteps=3000000, callback=[eval_callback, smart_stop])
+    print(f"[INFO] 모델 태그: {final_tag}")
+    model.learn(total_timesteps=total_timesteps, callback=[eval_callback, smart_stop])
 
-    print(f"\n🎉 훈련이 완료되었습니다! 최고 성능의 사령관이 {os.path.join(model_dir, 'best_model.zip')} 에 저장되었습니다.")
+    best_model_in_run = os.path.join(run_dir, "best_model.zip")
+    if os.path.exists(best_model_in_run):
+        promoted_path = os.path.join(candidates_dir, f"{final_tag}.zip")
+        shutil.copy2(best_model_in_run, promoted_path)
+        shutil.copy2(best_model_in_run, os.path.join(model_dir, "best_model.zip"))
+        print(f"[INFO] 후보 모델 저장: {promoted_path}")
+        print(f"[INFO] 기본 모델 갱신: {os.path.join(model_dir, 'best_model.zip')}")
+
+    print(f"\n🎉 훈련 완료. 결과 폴더: {run_dir}")
 
 if __name__ == "__main__":
-    train_commander()
+    parser = argparse.ArgumentParser(description="Train RL Commander with smart stop")
+    parser.add_argument("--total-timesteps", type=int, default=3000000)
+    parser.add_argument("--eval-freq", type=int, default=10000)
+    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--entropy-threshold", type=float, default=-0.01)
+    parser.add_argument("--reward-target", type=float, default=50.0,
+                        help="Set to a high value (e.g. 1e9) to effectively disable")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--tag", type=str, default=None,
+                        help="Short model tag, e.g. m007 or s42a (default: auto mNNN)")
+    args = parser.parse_args()
+
+    reward_target = args.reward_target
+    if reward_target >= 1e8:
+        reward_target = None
+
+    train_commander(total_timesteps=args.total_timesteps,
+                    eval_freq=args.eval_freq,
+                    patience=args.patience,
+                    reward_target=reward_target,
+                    entropy_threshold=args.entropy_threshold,
+                    seed=args.seed,
+                    model_tag=args.tag)
