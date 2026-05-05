@@ -125,31 +125,18 @@ def prepare_data(filepath, seq_length=120):
     df['pat_darkcloud']    = talib.CDLDARKCLOUDCOVER(o, h, l, c) / 100.0
     df['pat_harami']       = talib.CDLHARAMI(o, h, l, c) / 100.0
 
-    # 동적 ATR 변동성 계산
-    prev_close = df['close_raw'].shift(1)
-    tr1 = df['high_raw'] - df['low_raw']
-    tr2 = (df['high_raw'] - prev_close).abs()
-    tr3 = (df['low_raw'] - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(14).mean()
-    df['atr_pct'] = (atr / df['close_raw']) * 100
-    df['atr_pct'].fillna(method='bfill', inplace=True)
-
-    # 동적 트리플 배리어 라벨링
+    # 고정 트리플 배리어 라벨링 (백테스트와 동일: TP=1.4%, SL=0.7%, 손익비 2:1)
     horizon = 72
+    tp_thresh = 1.4   # 1.4% 고정 (백테스트 tp_pct=0.014)
+    sl_thresh = 0.7   # 0.7% 고정 (백테스트 sl_pct=0.007)
     close_prices = df['close_raw'].values
-    atr_pct_vals = df['atr_pct'].values
     n = len(close_prices)
     targets = np.zeros(n, dtype=int) 
 
     for i in range(n - horizon):
         curr_p = close_prices[i]
-        curr_atr = atr_pct_vals[i]
-        
-        tp_thresh = max(curr_atr * 2.0, 0.6)  
-        sl_thresh = max(curr_atr * 1.0, 0.3)  
 
-        future_window = close_prices[i+1 : i+1+horizon]
+        future_window = close_prices[i+1: i+1+horizon]
         ret = (future_window - curr_p) / curr_p * 100
         
         hit_tp_long = np.where(ret >= tp_thresh)[0]
@@ -173,6 +160,20 @@ def prepare_data(filepath, seq_length=120):
 
     df['Target'] = targets
 
+    # Hold 다운샘플링 — Long/Short 평균 개수에 맞춰 Hold 축소 (시퀀스 순서 보존)
+    hold_idx  = np.where(targets == 0)[0]
+    long_idx  = np.where(targets == 1)[0]
+    short_idx = np.where(targets == 2)[0]
+    target_hold_n = (len(long_idx) + len(short_idx)) // 2
+    if len(hold_idx) > target_hold_n:
+        rng = np.random.default_rng(42)
+        hold_idx = rng.choice(hold_idx, size=target_hold_n, replace=False)
+        keep_idx = np.sort(np.concatenate([hold_idx, long_idx, short_idx]))
+        df = df.iloc[keep_idx].reset_index(drop=True)
+        targets = targets[keep_idx]
+    new_counts = np.bincount(targets, minlength=3)
+    print(f"[INFO] Hold 다운샘플링 후 라벨 분포 - 관망(0): {new_counts[0]} | 롱(1): {new_counts[1]} | 숏(2): {new_counts[2]}")
+
     # 가격/거래량 스케일링
     price_cols = ['open', 'high', 'low', 'close']
     for col in price_cols:
@@ -185,7 +186,7 @@ def prepare_data(filepath, seq_length=120):
     df[vol_col[0]] = (df['volume_raw'] / vol_ma).clip(0, 10) 
 
     # 불필요 원본 컬럼 제거
-    drop_cols = [c for c in df.columns if c.endswith('_raw')] + ['atr_pct']
+    drop_cols = [c for c in df.columns if c.endswith('_raw')]
     df.drop(columns=drop_cols, inplace=True)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
@@ -364,6 +365,15 @@ def evaluate_model(model, test_loader, device):
     print(f"=================================================\n")
 
 if __name__ == "__main__":
+    # 재현성을 위한 시드 고정
+    SEED = 42
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    np.random.seed(SEED)
+    import random; random.seed(SEED)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     filepath = "data/BTC_USDT_processed.csv"
 

@@ -17,7 +17,7 @@ warnings.filterwarnings('ignore')
 
 
 class EnsembleTrainer:
-    def __init__(self, data_filepath, num_models=5, device=None, patience=10):
+    def __init__(self, data_filepath, num_models=5, device=None, patience=20):
         """
         Parameters:
         -----------

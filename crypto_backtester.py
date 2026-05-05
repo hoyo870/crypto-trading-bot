@@ -163,8 +163,9 @@ def _load_cache(data_path: str):
     return features, raw_close, raw_dates, meta
 
 
-def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
-                 batch_size=512, tp_pct=0.015, sl_pct=-0.007, max_bars=72):
+def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.60,
+                 batch_size=512, tp_pct=0.014, sl_pct=-0.007, max_bars=72,
+                 long_threshold=None, short_threshold=None):
     """
     Parameters
     ----------
@@ -310,13 +311,15 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
         
         if current_position == 0:
             # 🌟 [안전장치] AI가 도박을 거절하고 진짜 확신할 때만 진입
-            if probs[1] >= threshold_prob:
+            long_thr = long_threshold if long_threshold is not None else threshold_prob
+            short_thr = short_threshold if short_threshold is not None else threshold_prob
+            if probs[1] >= long_thr:
                 # 롱 진입
                 current_position = 1
                 entry_price = current_price
                 balance *= (1 - fee_rate) 
                 bars_held = 0
-            elif probs[2] >= threshold_prob:
+            elif probs[2] >= short_thr:
                 # 숏 진입
                 current_position = -1
                 entry_price = current_price
@@ -399,8 +402,8 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.50,
     print("[INFO] 📈 결과 차트가 'backtest_v4_result.png' 파일로 저장되었습니다!")
 
 
-def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.35,
-                       batch_size=512, tp_pct=0.015, sl_pct=-0.005,
+def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.60,
+                       batch_size=512, tp_pct=0.014, sl_pct=-0.007,
                        horizon=72, use_ensemble=False, ensemble_mode='soft', ensemble_count=5):
     """
     실제 매매 없이 모델 신호의 승/패만 추적하는 리포트 모드.
@@ -458,11 +461,13 @@ def run_signal_tracker(data_path, model_path, seq_length=120, threshold_prob=0.3
         raw_dates = raw_dates[valid_mask]
 
         exclude_cols = ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200']
-        ind_cols = [c for c in df.columns if c not in price_cols + vol_col + exclude_cols]
-        feature_cols = price_cols + vol_col + ind_cols
+        pat_cols  = [c for c in df.columns if c.startswith('pat_')]
+        ind_cols  = [c for c in df.columns if c not in price_cols + vol_col + exclude_cols + pat_cols]
+        feature_cols = price_cols + vol_col + ind_cols + pat_cols
         features = df[feature_cols].values.astype(np.float32)
 
         num_indicators = len(ind_cols)
+        num_patterns   = len(pat_cols)
         val_end = int(len(features) * 0.85)
 
     test_features = features[val_end:]
@@ -735,14 +740,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Crypto backtest / signal tracker runner")
     parser.add_argument("--mode", choices=["backtest", "signal", "both"], default="both")
     parser.add_argument("--data-path", default="data/BTC_USDT_processed.csv")
-    parser.add_argument("--model-path", default="models/best_lstm_btc_5m_multibranch_v4.pth")
+    parser.add_argument("--model-path", default="models/best_lstm_btc_5m_v5.pth")
     parser.add_argument("--seq-length", type=int, default=120)
-    parser.add_argument("--threshold", type=float, default=0.35)
+    parser.add_argument("--threshold", type=float, default=0.60)
+    parser.add_argument("--long-threshold", type=float, default=None,
+                        help="Long 진입 전용 threshold (미설정시 --threshold 사용)")
+    parser.add_argument("--short-threshold", type=float, default=None,
+                        help="Short 진입 전용 threshold (미설정시 --threshold 사용)")
     parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--tp-pct", type=float, default=0.045,
-                        help="Take profit ratio. e.g. 0.045 = 4.5%")
-    parser.add_argument("--sl-pct", type=float, default=-0.015,
-                        help="Stop loss ratio. e.g. -0.015 = -1.5%")
+    parser.add_argument("--tp-pct", type=float, default=0.014,
+                        help="Take profit ratio. e.g. 0.014 = 1.4%")
+    parser.add_argument("--sl-pct", type=float, default=-0.007,
+                        help="Stop loss ratio. e.g. -0.007 = -0.7%")
     parser.add_argument("--horizon", type=int, default=72,
                         help="Maximum holding bars / signal evaluation horizon")
     parser.add_argument("--use-ensemble", action="store_true",
@@ -764,6 +773,8 @@ if __name__ == "__main__":
             tp_pct=args.tp_pct,
             sl_pct=args.sl_pct,
             max_bars=args.horizon,
+            long_threshold=args.long_threshold,
+            short_threshold=args.short_threshold,
         )
 
     if args.mode in ["signal", "both"]:
