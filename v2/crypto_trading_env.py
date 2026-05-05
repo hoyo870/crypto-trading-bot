@@ -14,15 +14,22 @@ class CryptoTradingEnv(gym.Env):
         self.fee_rate = fee_rate
         
         print(f"[INFO] Trading Gym 데이터 로드 중 ({mode} 모드)...")
-        self.df = pd.read_csv(data_path)
+        df = pd.read_csv(data_path)
         
-        split_idx = int(len(self.df) * 0.7)
+        split_idx = int(len(df) * 0.7)
         if mode == 'train':
-            self.df = self.df.iloc[:split_idx].reset_index(drop=True)
+            df = df.iloc[:split_idx].reset_index(drop=True)
         else:
-            self.df = self.df.iloc[split_idx:].reset_index(drop=True)
+            df = df.iloc[split_idx:].reset_index(drop=True)
             
-        self.max_steps = len(self.df) - 1
+        self.max_steps = len(df) - 1
+
+        # 🚀 핵심 엔진 교체: Pandas DataFrame을 Numpy Array로 미리 변환해 메모리에 적재
+        self.closes = df['close'].values
+        self.long_scores = df['long_score'].values
+        self.short_scores = df['short_score'].values
+        self.context_scores = df['context_score'].values
+
         self.action_space = spaces.Discrete(4)
         self.observation_space = spaces.Box(low=-1, high=1, shape=(5,), dtype=np.float32)
 
@@ -34,12 +41,11 @@ class CryptoTradingEnv(gym.Env):
         self.entry_price = 0.0
         self.total_trades = 0
         self.win_trades = 0
-        # 최신 규격(튜플 반환)
         return self._get_obs(), {}
 
     def _get_obs(self):
-        row = self.df.iloc[self.current_step]
-        current_price = row['close']
+        # Numpy 배열에서 직접 가져와 속도 극대화
+        current_price = self.closes[self.current_step]
         unrealized_pnl = 0.0
         if self.position == 1:
             unrealized_pnl = (current_price - self.entry_price) / self.entry_price
@@ -47,16 +53,16 @@ class CryptoTradingEnv(gym.Env):
             unrealized_pnl = (self.entry_price - current_price) / self.entry_price
             
         obs = np.array([
-            row['long_score'],
-            row['short_score'],
-            row['context_score'],
+            self.long_scores[self.current_step],
+            self.short_scores[self.current_step],
+            self.context_scores[self.current_step],
             self.position,
             unrealized_pnl
         ], dtype=np.float32)
         return obs
 
     def step(self, action):
-        current_price = self.df.iloc[self.current_step]['close']
+        current_price = self.closes[self.current_step]
         reward = 0.0
         terminated = False
         truncated = False
@@ -81,25 +87,21 @@ class CryptoTradingEnv(gym.Env):
             self.balance = self.balance * (1 + ret) * (1 - self.fee_rate)
             self.total_trades += 1
             
-            # 🚨 핵심 패치 1: 진입/청산 수수료(총 0.1%)를 뺀 '진짜 순수익(Net Return)' 계산
             net_ret = ret - (self.fee_rate * 2)
 
-            # 🚨 핵심 패치 2: 진짜 돈을 벌었을 때만 칭찬하고, 수수료 떼고 마이너스면 가차없이 페널티!
             if net_ret > 0:
                 self.win_trades += 1
-                reward = (net_ret * 100.0) + 2.0  # 승리 시 강력한 도파민(보상)
+                reward = (net_ret * 100.0) + 2.0  
             else:
-                reward = (net_ret * 100.0) - 1.0  # 패배 시 엄격한 전기충격(페널티)
+                reward = (net_ret * 100.0) - 1.0  
 
             self.position = 0
             
         elif action == 0:
             if self.position == 0:
-                # 🚨 핵심 패치 3: 관망 페널티를 살짝 줄입니다. (-0.0001)
-                # 너무 쫄아서 무의미한 단타를 치지 않고, 진짜 기회를 기다릴 수 있게 해줍니다.
-                reward = -0.0001 
+                reward = -0.0001  # 무포지션 관망 패널티
             else:
-                reward = 0.0
+                reward = -0.0005  # 포지션 보유 중 hold → 기회비용 패널티 추가
 
         self.current_step += 1
         
@@ -109,6 +111,22 @@ class CryptoTradingEnv(gym.Env):
             truncated = True
 
         if terminated or truncated:
+            # 에피소드 종료 시 미청산 포지션 강제 청산 + 패널티
+            if self.position != 0:
+                final_price = self.df.iloc[min(self.current_step, self.max_steps - 1)]['close']
+                if self.position == 1:
+                    forced_ret = (final_price - self.entry_price) / self.entry_price
+                else:
+                    forced_ret = (self.entry_price - final_price) / self.entry_price
+                net_ret = forced_ret - (self.fee_rate * 2)
+                self.balance = self.balance * (1 + forced_ret) * (1 - self.fee_rate)
+                self.total_trades += 1
+                if net_ret > 0:
+                    self.win_trades += 1
+                # 강제 청산 추가 패널티: 스스로 청산하지 않은 것에 대한 벌점
+                reward += -2.0
+                self.position = 0
+
             info = {
                 'final_balance': self.balance,
                 'total_trades': self.total_trades,

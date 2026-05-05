@@ -26,7 +26,12 @@ def train_commander():
     policy_kwargs = dict(net_arch=[128, 64])
     
     # PPO 에이전트 생성
-    model = PPO("MlpPolicy", env, verbose=1, policy_kwargs=policy_kwargs, learning_rate=0.0003)
+    model = PPO("MlpPolicy", env, verbose=1, policy_kwargs=policy_kwargs,
+                learning_rate=0.0003,
+                ent_coef=0.01,        # 탐험 강제 → 정책 퇴화 방지
+                vf_coef=0.5,          # 가치함수 학습 가중치
+                n_steps=2048,
+                batch_size=64)
 
     # 최고 성과를 낼 때마다 모델을 저장하는 콜백
     model_dir = os.path.join(BASE_DIR, "models", "rl_commander")
@@ -37,7 +42,7 @@ def train_commander():
 
     # 훈련 (10만 번의 틱을 보면서 학습)
     print("[INFO] 강도 높은 실전 훈련에 돌입합니다...")
-    model.learn(total_timesteps=1000000, callback=eval_callback)
+    model.learn(total_timesteps=3000000, callback=eval_callback)
 
     print(f"\n🎉 훈련이 완료되었습니다! 최고 성능의 사령관이 {os.path.join(model_dir, 'best_model.zip')} 에 저장되었습니다.")
 
