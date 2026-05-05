@@ -113,7 +113,7 @@ class CryptoTradingEnv(gym.Env):
         if terminated or truncated:
             # 에피소드 종료 시 미청산 포지션 강제 청산 + 패널티
             if self.position != 0:
-                final_price = self.df.iloc[min(self.current_step, self.max_steps - 1)]['close']
+                final_price = self.closes[min(self.current_step, self.max_steps - 1)]
                 if self.position == 1:
                     forced_ret = (final_price - self.entry_price) / self.entry_price
                 else:
