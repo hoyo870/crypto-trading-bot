@@ -3,6 +3,7 @@ import sys
 import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from stable_baselines3 import PPO
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -125,7 +126,7 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix=""):
     model = PPO.load(model_path)
 
     # 백테스트는 항상 step 0부터 전체 데이터를 순서대로 평가
-    obs, _ = env.reset(options={'start_step': 0})
+    obs, _ = env.reset(options={'start_step': 0, 'max_ep_steps': None})
 
     done = False
     
@@ -231,12 +232,14 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix=""):
     print(f"승률        : {win_rate:.2f}%")
     print("========================================")
 
+    evaluated_end_step = min(env.current_step, env.max_steps - 1)
+
     summary = {
         "initial_balance": env.initial_balance,
         "final_balance": final_balance,
         "total_return_pct": pnl_pct,
         "period_start": _step_to_dt_str(0, all_time_index),
-        "period_end": _step_to_dt_str(env.max_steps - 1, all_time_index),
+        "period_end": _step_to_dt_str(evaluated_end_step, all_time_index),
         "total_trades": total_trades,
         "long_count": long_count,
         "short_count": short_count,
@@ -244,13 +247,19 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix=""):
     }
 
     # 4. 자산 곡선(Equity Curve) 시각화 및 저장
+    x_times = all_time_index.iloc[:len(balances)]
+
     plt.figure(figsize=(12, 6))
-    plt.plot(balances, label='RL Commander Balance', color='blue', linewidth=1.5)
+    plt.plot(x_times, balances, label='RL Commander Balance', color='blue', linewidth=1.5)
     plt.axhline(env.initial_balance, color='red', linestyle='--', label='Initial Balance')
     
     plt.title('RL Commander Equity Curve (Full Data: 2023-05-06 ~ 2026-05-04)', fontsize=14, fontweight='bold')
-    plt.xlabel('Time Steps (5m Ticks)', fontsize=12)
+    plt.xlabel('Datetime', fontsize=12)
     plt.ylabel('Balance (USDT)', fontsize=12)
+    ax = plt.gca()
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    plt.xticks(rotation=30, ha='right')
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
     

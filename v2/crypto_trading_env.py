@@ -63,6 +63,11 @@ class CryptoTradingEnv(gym.Env):
         else:
             max_start = max(0, self.max_steps - MIN_EP_STEPS)
             self.start_step = int(self.np_random.integers(0, max_start + 1))
+        if options is not None and 'max_ep_steps' in options:
+            max_ep_steps = options['max_ep_steps']
+            self.max_episode_steps = None if max_ep_steps is None else int(max_ep_steps)
+        else:
+            self.max_episode_steps = MAX_EP_STEPS
         self.current_step = self.start_step
 
         self.balance      = self.initial_balance
@@ -185,7 +190,9 @@ class CryptoTradingEnv(gym.Env):
 
         if self.balance <= 0:
             terminated = True
-        if self.current_step >= self.max_steps or ep_steps >= MAX_EP_STEPS:
+        if self.current_step >= self.max_steps:
+            truncated = True
+        elif self.max_episode_steps is not None and ep_steps >= self.max_episode_steps:
             truncated = True
 
         if terminated or truncated:
