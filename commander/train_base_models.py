@@ -12,6 +12,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
 
 def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -87,7 +88,7 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
                 break
 
     # 최고 모델 저장
-    model_dir = os.path.join(BASE_DIR, "models", "base")
+    model_dir = os.path.join(ROOT_DIR, "models", "commander", "base")
     os.makedirs(model_dir, exist_ok=True)
     save_path = os.path.join(model_dir, f"{expert_type}_expert.pth")
     if best_model_weights is not None:
@@ -96,7 +97,7 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
 
 
 if __name__ == "__main__":
-    data_path = os.path.join(BASE_DIR, "..", "data", "BTC_USDT_processed.csv")
+    data_path = os.path.join(ROOT_DIR, "data", "BTC_USDT_processed.csv")
     if not os.path.exists(data_path):
         print("[ERROR] 데이터 파일을 찾을 수 없습니다.")
     else:

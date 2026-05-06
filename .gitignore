@@ -36,7 +36,5 @@ backup/v3/reports/
 
 # Keep source datasets and scalers tracked
 !data/*.csv
-!commander/data/*.csv
-!backup/v2/data/*.csv
-!backup/v3/data/*.csv
+!data/commander/*.csv
 !data/scalers/*.pkl

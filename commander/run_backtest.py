@@ -4,7 +4,7 @@ Commander 일괄 백테스트 실행기
 사용법:
   python run_backtest.py                          # 기본(전체 candidates, leverage=2)
   python run_backtest.py --leverage 3             # 3배 레버리지
-  python run_backtest.py --tags m001,m002 --leverage 2
+    python run_backtest.py --tags lev2_seed42_001,lev2_seed43_001 --leverage 2
 """
 import os
 import sys
@@ -13,6 +13,7 @@ import argparse
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
 
 
 def run_backtest_all(tags, leverage, model_dir, log_dir, data_path, reports_dir):
@@ -70,13 +71,13 @@ if __name__ == "__main__":
     parser.add_argument("--leverage", type=int, default=2,
                         help="레버리지 배수 (기본 2)")
     parser.add_argument("--model-dir", type=str,
-                        default=os.path.join(BASE_DIR, "models", "rl_commander"),
+                        default=os.path.join(ROOT_DIR, "models", "commander"),
                         help="모델 루트 디렉토리")
     parser.add_argument("--log-dir", type=str,
                         default=os.path.join(BASE_DIR, "logs", "backtest"),
                         help="백테스트 로그 디렉토리")
     parser.add_argument("--data-path", type=str,
-                        default=os.path.join(BASE_DIR, "data", "base_signals_log.csv"),
+                        default=os.path.join(ROOT_DIR, "data", "commander", "base_signals_log.csv"),
                         help="백테스트 데이터 CSV")
     parser.add_argument("--reports-dir", type=str,
                         default=os.path.join(BASE_DIR, "reports"),

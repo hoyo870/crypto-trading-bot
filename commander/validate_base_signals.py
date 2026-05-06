@@ -10,6 +10,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
 
 class SlidingWindowDataset(Dataset):
     def __init__(self, features, seq_length):
@@ -85,7 +86,7 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512):
     test_dates = raw_dates[val_end:]
 
     print(f"[INFO] 3개의 전문가 모델 로딩 중...")
-    model_dir = os.path.join(BASE_DIR, "models", "base")
+    model_dir = os.path.join(ROOT_DIR, "models", "commander", "base")
 
     long_model = PriceActionExpert().to(device)
     long_model.load_state_dict(torch.load(os.path.join(model_dir, "long_expert.pth"), map_location=device))
@@ -128,7 +129,7 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512):
         'context_score': np.round(context_scores, 4)
     })
 
-    output_dir = os.path.join(BASE_DIR, "data")
+    output_dir = os.path.join(ROOT_DIR, "data", "commander")
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, "base_signals_log.csv")
     results_df.to_csv(out_path, index=False)
@@ -139,7 +140,7 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512):
     print(results_df[['long_score', 'short_score', 'context_score']].describe())
 
 if __name__ == "__main__":
-    if not os.path.exists(os.path.join(BASE_DIR, "models", "base", "long_expert.pth")):
+    if not os.path.exists(os.path.join(ROOT_DIR, "models", "commander", "base", "long_expert.pth")):
         print("[ERROR] Base 모델이 없습니다. 'python train_base_models.py'를 먼저 실행하세요.")
     else:
-        extract_base_signals(os.path.join(BASE_DIR, "..", "data", "BTC_USDT_processed.csv"))
+        extract_base_signals(os.path.join(ROOT_DIR, "data", "BTC_USDT_processed.csv"))

@@ -9,6 +9,7 @@ from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
 
 import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 from crypto_trading_env import LeverageTradingEnv
@@ -99,14 +100,16 @@ def _normalize_tag(tag):
     return clean or None
 
 
-def _next_model_tag(candidates_dir):
+def _next_model_tag(candidates_dir, leverage, seed):
+    prefix = f"lev{int(leverage)}_seed{int(seed)}"
+    pattern = re.compile(rf"{re.escape(prefix)}_(\d{{3}})\.zip$")
     max_idx = 0
     if os.path.isdir(candidates_dir):
         for name in os.listdir(candidates_dir):
-            m = re.fullmatch(r"m(\d{3})\.zip", name)
+            m = pattern.fullmatch(name)
             if m:
                 max_idx = max(max_idx, int(m.group(1)))
-    return f"m{max_idx + 1:03d}"
+    return f"{prefix}_{max_idx + 1:03d}"
 
 
 def train_commander(total_timesteps=5_000_000,
@@ -127,7 +130,7 @@ def train_commander(total_timesteps=5_000_000,
     print(f"{'='*55}")
 
     if data_path is None:
-        data_path = os.path.join(BASE_DIR, "data", "base_signals_log.csv")
+        data_path = os.path.join(ROOT_DIR, "data", "commander", "base_signals_log.csv")
     if not os.path.exists(data_path):
         print("[ERROR] base_signals_log.csv 없음. data 폴더 확인 필요.")
         return
@@ -140,14 +143,14 @@ def train_commander(total_timesteps=5_000_000,
     print(f"[INFO] 평가 시작점(국면 분할): {eval_starts}")
 
     if model_dir is None:
-        model_dir = os.path.join(BASE_DIR, "models", "rl_commander")
+        model_dir = os.path.join(ROOT_DIR, "models", "commander")
     runs_dir = os.path.join(model_dir, "runs")
     candidates_dir = os.path.join(model_dir, "candidates")
     os.makedirs(runs_dir, exist_ok=True)
     os.makedirs(candidates_dir, exist_ok=True)
 
     requested_tag = _normalize_tag(model_tag) if model_tag else None
-    final_tag = requested_tag or _next_model_tag(candidates_dir)
+    final_tag = requested_tag or _next_model_tag(candidates_dir, leverage=leverage, seed=seed)
     run_dir = os.path.join(runs_dir, final_tag)
     os.makedirs(run_dir, exist_ok=True)
 
@@ -230,15 +233,15 @@ if __name__ == "__main__":
     parser.add_argument("--leverage", type=int, default=2,
                         help="레버리지 배수 (1=현물, 2=기본, 3 등)")
     parser.add_argument("--tag", type=str, default=None,
-                        help="모델 태그 (기본: 자동 mNNN)")
+                        help="모델 태그 (기본: 자동 lev{레버리지}_seed{시드}_NNN)")
     parser.add_argument("--load-model", type=str, default=None,
                         help="파인튜닝할 기존 commander 모델 ZIP 경로")
     parser.add_argument("--improved-hp", action="store_true",
                         help="개선 하이퍼파라미터 (net_arch 확장·lr 감소)")
     parser.add_argument("--model-dir", type=str, default=None,
-                        help="모델 저장 루트 디렉토리 (기본: commander/models/rl_commander)")
+                        help="모델 저장 루트 디렉토리 (기본: root/models/commander)")
     parser.add_argument("--data-path", type=str, default=None,
-                        help="학습/평가 입력 데이터 CSV 경로 (기본: commander/data/base_signals_log.csv)")
+                        help="학습/평가 입력 데이터 CSV 경로 (기본: root/data/commander/base_signals_log.csv)")
     args = parser.parse_args()
 
     reward_target = args.reward_target

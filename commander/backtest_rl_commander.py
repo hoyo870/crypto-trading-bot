@@ -9,6 +9,7 @@ import matplotlib.dates as mdates
 from stable_baselines3 import PPO
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
@@ -20,7 +21,7 @@ warnings.filterwarnings('ignore')
 # ── 유틸 ─────────────────────────────────────────────────────────
 def _resolve_model_path(model_path=None, model_tag=None, model_dir=None):
     if model_dir is None:
-        model_dir = os.path.join(BASE_DIR, "models", "rl_commander")
+        model_dir = os.path.join(ROOT_DIR, "models", "commander")
     if model_path is not None:
         if not os.path.isabs(model_path):
             model_path = os.path.join(BASE_DIR, model_path)
@@ -145,7 +146,7 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
         )
 
     if data_path is None:
-        data_path = os.path.join(BASE_DIR, "data", "base_signals_log.csv")
+        data_path = os.path.join(ROOT_DIR, "data", "commander", "base_signals_log.csv")
     all_time_index = _load_all_datetimes(data_path)
 
     for path in model_paths:
@@ -358,17 +359,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backtest Commander RL (Leverage)")
     parser.add_argument("--model-path", type=str, default=None)
     parser.add_argument("--model-tag", type=str, default=None,
-                        help="models/rl_commander/candidates 내 태그, e.g. m001")
+                        help="models/commander/candidates 내 태그, e.g. lev2_seed42_001")
     parser.add_argument("--ensemble-tags", type=str, default=None,
-                        help="앙상블 태그 (쉼표 구분), e.g. m001,m002,m003")
+                        help="앙상블 태그 (쉼표 구분), e.g. lev2_seed42_001,lev2_seed43_001")
     parser.add_argument("--suffix", type=str, default="",
                         help="결과 파일명 접미사")
     parser.add_argument("--leverage", type=int, default=2,
                         help="레버리지 배수 (기본 2)")
     parser.add_argument("--model-dir", type=str, default=None,
-                        help="모델 루트 디렉토리 (기본: commander/models/rl_commander)")
+                        help="모델 루트 디렉토리 (기본: root/models/commander)")
     parser.add_argument("--data-path", type=str, default=None,
-                        help="백테스트 데이터 CSV 경로 (기본: commander/data/base_signals_log.csv)")
+                        help="백테스트 데이터 CSV 경로 (기본: root/data/commander/base_signals_log.csv)")
     parser.add_argument("--reports-dir", type=str, default=None,
                         help="리포트/차트 출력 디렉토리 (기본: commander/reports)")
     args = parser.parse_args()

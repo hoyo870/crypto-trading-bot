@@ -12,18 +12,23 @@ import argparse
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
 
 
-def _next_tag(candidates_dir):
+def _next_tag(candidates_dir, leverage, seed):
     os.makedirs(candidates_dir, exist_ok=True)
+    prefix = f"lev{int(leverage)}_seed{int(seed)}"
     max_idx = 0
     for f in os.listdir(candidates_dir):
-        if f.startswith("m") and f.endswith(".zip") and len(f) == 8:
-            try:
-                max_idx = max(max_idx, int(f[1:4]))
-            except ValueError:
-                pass
-    return f"m{max_idx + 1:03d}"
+        if not f.endswith(".zip"):
+            continue
+        stem = f[:-4]
+        if not stem.startswith(prefix + "_"):
+            continue
+        suffix = stem[len(prefix) + 1:]
+        if suffix.isdigit() and len(suffix) == 3:
+            max_idx = max(max_idx, int(suffix))
+    return f"{prefix}_{max_idx + 1:03d}"
 
 
 def _resolve_seeds(count, base_seed, seed_step, seeds_csv):
@@ -59,8 +64,8 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
 
     results = []
     for i in range(count):
-        tag = _next_tag(candidates_dir)
         seed = seeds[i]
+        tag = _next_tag(candidates_dir, leverage=leverage, seed=seed)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_path = os.path.join(log_dir, f"train_{tag}_seed{seed}_{ts}.log")
 
@@ -109,13 +114,13 @@ if __name__ == "__main__":
     parser.add_argument("--seeds", type=str, default=None,
                         help="쉼표 구분 시드 목록. 지정 시 base/step보다 우선")
     parser.add_argument("--model-dir", type=str,
-                        default=os.path.join(BASE_DIR, "models", "rl_commander"),
+                        default=os.path.join(ROOT_DIR, "models", "commander"),
                         help="모델 저장 루트 디렉토리")
     parser.add_argument("--log-dir", type=str,
                         default=os.path.join(BASE_DIR, "logs", "train"),
                         help="학습 로그 저장 디렉토리")
     parser.add_argument("--data-path", type=str,
-                        default=os.path.join(BASE_DIR, "data", "base_signals_log.csv"),
+                        default=os.path.join(ROOT_DIR, "data", "commander", "base_signals_log.csv"),
                         help="학습/평가에 사용할 입력 데이터 CSV")
     args = parser.parse_args()
 
