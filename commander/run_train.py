@@ -206,7 +206,7 @@ if __name__ == "__main__":
                         help="학습/평가에 사용할 입력 데이터 CSV")
     parser.add_argument("--top-k", type=int, default=3,
                         help="학습 완료 후 candidates 유지 개수 (0이면 비활성)")
-    parser.add_argument("--split-mode", type=str, choices=["none", "holdout"], default="holdout",
+    parser.add_argument("--split-mode", type=str, choices=["none", "holdout"], default="none",
                         help="학습/평가 데이터 분할 모드")
     parser.add_argument("--train-ratio", type=float, default=0.7,
                         help="holdout 모드 학습 비율 (0~1)")

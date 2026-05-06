@@ -178,7 +178,7 @@ def train_commander(total_timesteps=5_000_000,
                     leverage=2,
                     load_model_path=None,
                     improved_hp=False,
-                    split_mode="holdout",
+                    split_mode="none",
                     train_ratio=0.7,
                     eval_ratio=0.2,
                     train_ep_steps=20_000,
@@ -349,7 +349,7 @@ if __name__ == "__main__":
                         help="파인튜닝할 기존 commander 모델 ZIP 경로")
     parser.add_argument("--improved-hp", action="store_true",
                         help="개선 하이퍼파라미터 (net_arch 확장·lr 감소)")
-    parser.add_argument("--split-mode", type=str, choices=["none", "holdout"], default="holdout",
+    parser.add_argument("--split-mode", type=str, choices=["none", "holdout"], default="none",
                         help="학습/평가 데이터 분할 모드")
     parser.add_argument("--train-ratio", type=float, default=0.7,
                         help="holdout 모드 학습 비율 (0~1)")
