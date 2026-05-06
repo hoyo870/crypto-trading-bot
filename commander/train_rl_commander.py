@@ -1,0 +1,261 @@
+"""Commander RL Commander 학습 스크립트 (통합 레버리지 환경)."""
+import argparse
+import os
+import re
+import shutil
+import numpy as np
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
+
+import sys
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+from crypto_trading_env import LeverageTradingEnv
+
+
+class SmartStopCallback(BaseCallback):
+    """
+    3가지 조건으로 자동 학습 종료:
+    1. Early Stopping : eval reward가 patience 횟수 연속 개선 없으면 종료
+    2. 정책 퇴화 감지 : entropy_loss > entropy_threshold 이면 종료
+    3. 목표 달성     : eval reward >= reward_target 이면 종료
+    """
+    def __init__(self, eval_callback, patience=20, eval_freq=10000,
+                 entropy_threshold=-0.01, reward_target=50.0, verbose=1):
+        super().__init__(verbose)
+        self.eval_callback = eval_callback
+        self.patience = patience
+        self.eval_freq = eval_freq
+        self.entropy_threshold = entropy_threshold
+        self.reward_target = reward_target
+        self._no_improve_count = 0
+        self._best_reward = -np.inf
+
+    def _on_step(self) -> bool:
+        entropy = self.logger.name_to_value.get("train/entropy_loss", None)
+        if entropy is not None and entropy > self.entropy_threshold:
+            if self.verbose:
+                print(f"\n[SmartStop] 💀 정책 퇴화 감지: entropy_loss={entropy:.6f} → 종료")
+            return False
+
+        if self.n_calls % self.eval_freq != 0:
+            return True
+
+        current_best = self.eval_callback.best_mean_reward
+        if current_best == -np.inf:
+            return True
+
+        if current_best > self._best_reward:
+            self._best_reward = current_best
+            self._no_improve_count = 0
+            if self.verbose:
+                print(f"[SmartStop] ✅ 개선됨: best_reward={self._best_reward:.2f}")
+        else:
+            self._no_improve_count += 1
+            if self.verbose:
+                print(f"[SmartStop] ⚠️  개선 없음 {self._no_improve_count}/{self.patience} "
+                      f"(best={self._best_reward:.2f})")
+
+        if self._no_improve_count >= self.patience:
+            if self.verbose:
+                print(f"\n[SmartStop] ⏹  Early Stopping (best={self._best_reward:.2f})")
+            return False
+
+        if self._best_reward >= self.reward_target:
+            if self.verbose:
+                print(f"\n[SmartStop] 🎯 목표 달성! eval reward={self._best_reward:.2f}")
+            return False
+
+        return True
+
+
+def _build_regime_eval_starts(max_steps, eval_window=20_000):
+    anchors = [0.0, 0.25, 0.50, 0.75]
+    max_start = max(0, max_steps - eval_window)
+    starts = [min(max_start, int(max_steps * q)) for q in anchors]
+    return sorted(set(starts)) or [0]
+
+
+class RegimeEvalEnv(LeverageTradingEnv):
+    def __init__(self, data_path, eval_starts, eval_window=20_000, leverage=2):
+        super().__init__(data_path=data_path, leverage=leverage)
+        self.eval_starts = list(eval_starts)
+        self.eval_window = eval_window
+        self.eval_idx = 0
+
+    def reset(self, seed=None, options=None):
+        options = dict(options or {})
+        if 'start_step' not in options:
+            options['start_step'] = self.eval_starts[self.eval_idx % len(self.eval_starts)]
+        if 'max_ep_steps' not in options:
+            options['max_ep_steps'] = self.eval_window
+        self.eval_idx += 1
+        return super().reset(seed=seed, options=options)
+
+
+def _normalize_tag(tag):
+    clean = re.sub(r"[^a-zA-Z0-9_-]", "", str(tag)).lower()
+    return clean or None
+
+
+def _next_model_tag(candidates_dir):
+    max_idx = 0
+    if os.path.isdir(candidates_dir):
+        for name in os.listdir(candidates_dir):
+            m = re.fullmatch(r"m(\d{3})\.zip", name)
+            if m:
+                max_idx = max(max_idx, int(m.group(1)))
+    return f"m{max_idx + 1:03d}"
+
+
+def train_commander(total_timesteps=5_000_000,
+                    eval_freq=10_000,
+                    patience=30,
+                    reward_target=None,
+                    entropy_threshold=-0.01,
+                    seed=42,
+                    model_tag=None,
+                    leverage=2,
+                    load_model_path=None,
+                    improved_hp=False,
+                    model_dir=None,
+                    data_path=None):
+
+    print(f"\n{'='*55}")
+    print(f"🚀 Commander RL 훈련 시작 (레버리지 {int(leverage)}x)")
+    print(f"{'='*55}")
+
+    if data_path is None:
+        data_path = os.path.join(BASE_DIR, "data", "base_signals_log.csv")
+    if not os.path.exists(data_path):
+        print("[ERROR] base_signals_log.csv 없음. data 폴더 확인 필요.")
+        return
+
+    env = LeverageTradingEnv(data_path=data_path, leverage=leverage)
+
+    eval_starts = _build_regime_eval_starts(max_steps=env.max_steps, eval_window=20_000)
+    eval_env = RegimeEvalEnv(data_path=data_path, eval_starts=eval_starts,
+                             eval_window=20_000, leverage=leverage)
+    print(f"[INFO] 평가 시작점(국면 분할): {eval_starts}")
+
+    if model_dir is None:
+        model_dir = os.path.join(BASE_DIR, "models", "rl_commander")
+    runs_dir = os.path.join(model_dir, "runs")
+    candidates_dir = os.path.join(model_dir, "candidates")
+    os.makedirs(runs_dir, exist_ok=True)
+    os.makedirs(candidates_dir, exist_ok=True)
+
+    requested_tag = _normalize_tag(model_tag) if model_tag else None
+    final_tag = requested_tag or _next_model_tag(candidates_dir)
+    run_dir = os.path.join(runs_dir, final_tag)
+    os.makedirs(run_dir, exist_ok=True)
+
+    # ── 모델 초기화 ──────────────────────────────────────────────
+    if load_model_path:
+        if not os.path.exists(load_model_path):
+            print(f"[ERROR] 로드할 모델 파일 없음: {load_model_path}")
+            return
+        print(f"[INFO] 🔄 파인튜닝 모드: {load_model_path} 로드")
+        # 구버전 9차원 obs 모델은 현재 10차원 환경에 직접 로드할 수 없음
+        # 파인튜닝은 같은 obs 차원의 commander 모델에만 적용 가능
+        model = PPO.load(load_model_path, env=env, device="auto",
+                         custom_objects={
+                             "learning_rate": 1e-4,
+                             "ent_coef": 0.005,
+                             "n_steps": 4096,
+                             "batch_size": 128,
+                         })
+        print(f"[INFO] 파인튜닝 hp: lr=1e-4, ent_coef=0.005, n_steps=4096, batch=128")
+    elif improved_hp:
+        policy_kwargs = dict(net_arch=[256, 128, 64])
+        print(f"[INFO] 🆕 개선 hp 모드: net_arch=[256,128,64], lr=1e-4")
+        model = PPO("MlpPolicy", env, verbose=1, policy_kwargs=policy_kwargs,
+                    learning_rate=1e-4,
+                    ent_coef=0.005,
+                    vf_coef=0.5,
+                    n_steps=4096,
+                    batch_size=128,
+                    seed=seed)
+    else:
+        policy_kwargs = dict(net_arch=[128, 64])
+        print(f"[INFO] 기본 hp 모드: net_arch=[128,64], lr=3e-4")
+        model = PPO("MlpPolicy", env, verbose=1, policy_kwargs=policy_kwargs,
+                    learning_rate=3e-4,
+                    ent_coef=0.01,
+                    vf_coef=0.5,
+                    n_steps=2048,
+                    batch_size=64,
+                    seed=seed)
+
+    eval_callback = EvalCallback(eval_env, best_model_save_path=run_dir,
+                                 log_path=run_dir, eval_freq=eval_freq,
+                                 deterministic=True, render=False,
+                                 n_eval_episodes=len(eval_starts))
+
+    smart_stop = SmartStopCallback(
+        eval_callback=eval_callback,
+        patience=patience,
+        eval_freq=eval_freq,
+        entropy_threshold=entropy_threshold,
+        reward_target=(float("inf") if reward_target is None else reward_target),
+    )
+
+    print(f"[INFO] 모델 태그: {final_tag} | 레버리지: {int(leverage)}x")
+    print("[INFO] 학습 시작...")
+    model.learn(total_timesteps=total_timesteps, callback=[eval_callback, smart_stop])
+
+    best_model_in_run = os.path.join(run_dir, "best_model.zip")
+    if os.path.exists(best_model_in_run):
+        promoted_path = os.path.join(candidates_dir, f"{final_tag}.zip")
+        shutil.copy2(best_model_in_run, promoted_path)
+        shutil.copy2(best_model_in_run, os.path.join(model_dir, "best_model.zip"))
+        print(f"[INFO] 후보 모델 저장: {promoted_path}")
+        print(f"[INFO] 기본 모델 갱신: {os.path.join(model_dir, 'best_model.zip')}")
+    else:
+        print("[WARN] best_model.zip 미생성 — eval 미도달 가능성 있음")
+
+    print(f"\n🎉 훈련 완료. 결과 폴더: {run_dir}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train Commander RL (Leverage)")
+    parser.add_argument("--total-timesteps", type=int, default=5_000_000)
+    parser.add_argument("--eval-freq", type=int, default=10_000)
+    parser.add_argument("--patience", type=int, default=30)
+    parser.add_argument("--entropy-threshold", type=float, default=-0.01)
+    parser.add_argument("--reward-target", type=float, default=1e9,
+                        help="목표 eval reward (매우 크게 설정 시 사실상 비활성)")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--leverage", type=int, default=2,
+                        help="레버리지 배수 (1=현물, 2=기본, 3 등)")
+    parser.add_argument("--tag", type=str, default=None,
+                        help="모델 태그 (기본: 자동 mNNN)")
+    parser.add_argument("--load-model", type=str, default=None,
+                        help="파인튜닝할 기존 commander 모델 ZIP 경로")
+    parser.add_argument("--improved-hp", action="store_true",
+                        help="개선 하이퍼파라미터 (net_arch 확장·lr 감소)")
+    parser.add_argument("--model-dir", type=str, default=None,
+                        help="모델 저장 루트 디렉토리 (기본: commander/models/rl_commander)")
+    parser.add_argument("--data-path", type=str, default=None,
+                        help="학습/평가 입력 데이터 CSV 경로 (기본: commander/data/base_signals_log.csv)")
+    args = parser.parse_args()
+
+    reward_target = args.reward_target
+    if reward_target >= 1e8:
+        reward_target = None
+
+    train_commander(
+        total_timesteps=args.total_timesteps,
+        eval_freq=args.eval_freq,
+        patience=args.patience,
+        reward_target=reward_target,
+        entropy_threshold=args.entropy_threshold,
+        seed=args.seed,
+        model_tag=args.tag,
+        leverage=args.leverage,
+        load_model_path=args.load_model,
+        improved_hp=args.improved_hp,
+        model_dir=args.model_dir,
+        data_path=args.data_path,
+    )

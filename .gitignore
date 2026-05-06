@@ -18,3 +18,25 @@ signal_logs_*.txt
 
 # Backtest result charts
 backtest_*.png
+
+# Runtime outputs
+logs/
+reports/
+commander/logs/
+commander/reports/
+backup/v2/logs/
+backup/v2/reports/
+backup/v3/logs/
+backup/v3/reports/
+
+# Trained artifacts
+*.zip
+*.pth
+*.npz
+
+# Keep source datasets and scalers tracked
+!data/*.csv
+!commander/data/*.csv
+!backup/v2/data/*.csv
+!backup/v3/data/*.csv
+!data/scalers/*.pkl
