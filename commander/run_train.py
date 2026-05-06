@@ -10,6 +10,8 @@ import sys
 import subprocess
 import argparse
 from datetime import datetime
+import pandas as pd
+import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
@@ -48,11 +50,78 @@ def _resolve_seeds(count, base_seed, seed_step, seeds_csv):
     return [base_seed + i * seed_step for i in range(count)]
 
 
+def _preflight_check(data_path, model_dir):
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"입력 데이터 파일이 없습니다: {data_path}")
+
+    df = pd.read_csv(data_path)
+    required_cols = {"datetime", "close", "long_score", "short_score", "context_score"}
+    missing = sorted(required_cols - set(df.columns))
+    if missing:
+        raise ValueError(f"입력 데이터 필수 컬럼 누락: {missing}")
+
+    if len(df) < 50_000:
+        print(f"[WARN] 입력 데이터 행 수가 적습니다: {len(df):,}")
+
+    nan_count = int(df[list(required_cols)].isna().sum().sum())
+    if nan_count > 0:
+        raise ValueError(f"입력 데이터 필수 컬럼에 NaN이 존재합니다: {nan_count}개")
+
+    os.makedirs(os.path.join(model_dir, "runs"), exist_ok=True)
+    os.makedirs(os.path.join(model_dir, "candidates"), exist_ok=True)
+    print(f"[INFO] preflight 통과 | rows={len(df):,} | model_dir={model_dir}")
+
+
+def _read_run_score(model_dir, tag):
+    eval_npz = os.path.join(model_dir, "runs", tag, "evaluations.npz")
+    if not os.path.exists(eval_npz):
+        best_model = os.path.join(model_dir, "runs", tag, "best_model.zip")
+        return 0.0 if os.path.exists(best_model) else float("-inf")
+    try:
+        data = np.load(eval_npz)
+        results = data.get("results", None)
+        if results is None or len(results) == 0:
+            return float("-inf")
+        return float(np.nanmax(results))
+    except Exception:
+        return float("-inf")
+
+
+def _select_top_k_candidates(model_dir, tags, top_k):
+    if top_k <= 0:
+        return
+
+    scored = [(tag, _read_run_score(model_dir, tag)) for tag in tags]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    keep = {tag for tag, _ in scored[:min(top_k, len(scored))]}
+
+    candidates_dir = os.path.join(model_dir, "candidates")
+    for tag, score in scored:
+        p = os.path.join(candidates_dir, f"{tag}.zip")
+        if tag not in keep and os.path.exists(p):
+            os.remove(p)
+
+    if scored and scored[0][0] in keep:
+        best_tag = scored[0][0]
+        best_src = os.path.join(candidates_dir, f"{best_tag}.zip")
+        if os.path.exists(best_src):
+            import shutil
+            shutil.copy2(best_src, os.path.join(model_dir, "best_model.zip"))
+
+    print("\n[INFO] top-k 후보 선별 결과")
+    for i, (tag, score) in enumerate(scored, start=1):
+        mark = "KEEP" if tag in keep else "DROP"
+        s = "-inf" if score == float("-inf") else f"{score:.4f}"
+        print(f"  {i:02d}. {tag:20s} score={s:>8s} [{mark}]")
+
+
 def run_train_batch(count, leverage, timesteps, patience, improved_hp,
                     base_seed, seed_step, seeds_csv,
-                    model_dir, log_dir, data_path):
+                    model_dir, log_dir, data_path, top_k,
+                    split_mode, train_ratio, eval_ratio, train_ep_steps, eval_window):
     os.makedirs(log_dir, exist_ok=True)
     candidates_dir = os.path.join(model_dir, "candidates")
+    _preflight_check(data_path=data_path, model_dir=model_dir)
 
     seeds = _resolve_seeds(
         count=count,
@@ -78,6 +147,11 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
             "--patience", str(patience),
             "--reward-target", "1000000000",
             "--seed", str(seed),
+            "--split-mode", split_mode,
+            "--train-ratio", str(train_ratio),
+            "--eval-ratio", str(eval_ratio),
+            "--train-ep-steps", str(train_ep_steps),
+            "--eval-window", str(eval_window),
             "--model-dir", model_dir,
             "--data-path", data_path,
         ]
@@ -91,6 +165,12 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
         status = "OK" if ret.returncode == 0 else "FAIL"
         results.append((tag, seed, status, log_path))
         print(f"[DONE] {tag} -> {status}")
+
+    _select_top_k_candidates(
+        model_dir=model_dir,
+        tags=[tag for tag, _, status, _ in results if status == "OK"],
+        top_k=top_k,
+    )
 
     print("\n" + "=" * 60)
     print("학습 완료 요약")
@@ -122,6 +202,18 @@ if __name__ == "__main__":
     parser.add_argument("--data-path", type=str,
                         default=os.path.join(ROOT_DIR, "data", "commander", "base_signals_log.csv"),
                         help="학습/평가에 사용할 입력 데이터 CSV")
+    parser.add_argument("--top-k", type=int, default=3,
+                        help="학습 완료 후 candidates 유지 개수 (0이면 비활성)")
+    parser.add_argument("--split-mode", type=str, choices=["none", "holdout"], default="holdout",
+                        help="학습/평가 데이터 분할 모드")
+    parser.add_argument("--train-ratio", type=float, default=0.7,
+                        help="holdout 모드 학습 비율 (0~1)")
+    parser.add_argument("--eval-ratio", type=float, default=0.2,
+                        help="holdout 모드 평가 비율 (0~1)")
+    parser.add_argument("--train-ep-steps", type=int, default=20_000,
+                        help="학습 에피소드 길이")
+    parser.add_argument("--eval-window", type=int, default=20_000,
+                        help="평가 에피소드 길이")
     args = parser.parse_args()
 
     run_train_batch(
@@ -136,4 +228,10 @@ if __name__ == "__main__":
         model_dir=args.model_dir,
         log_dir=args.log_dir,
         data_path=args.data_path,
+        top_k=args.top_k,
+        split_mode=args.split_mode,
+        train_ratio=args.train_ratio,
+        eval_ratio=args.eval_ratio,
+        train_ep_steps=args.train_ep_steps,
+        eval_window=args.eval_window,
     )

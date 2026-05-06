@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import numpy as np
+import pandas as pd
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
 
@@ -78,6 +79,30 @@ def _build_regime_eval_starts(max_steps, eval_window=20_000):
     return sorted(set(starts)) or [0]
 
 
+def _build_range_eval_starts(start_step, end_step, eval_window=20_000, n_points=4):
+    if end_step <= start_step:
+        return [max(0, start_step)]
+    span = max(1, end_step - start_step)
+    max_start = max(start_step, end_step - eval_window)
+    if max_start <= start_step:
+        return [start_step]
+    anchors = np.linspace(0.0, 1.0, num=max(2, n_points))
+    starts = [int(start_step + (max_start - start_step) * q) for q in anchors]
+    return sorted(set(starts)) or [start_step]
+
+
+def _resolve_split_ranges(max_steps, split_mode, train_ratio, eval_ratio):
+    if split_mode == "none":
+        return 0, max_steps, max(0, max_steps - int(max_steps * eval_ratio)), max_steps
+
+    # holdout: 앞 구간 학습 / 뒤 구간 평가
+    train_end = int(max_steps * train_ratio)
+    eval_start = max(train_end + 1, max_steps - int(max_steps * eval_ratio))
+    train_start = 0
+    eval_end = max_steps
+    return train_start, train_end, eval_start, eval_end
+
+
 class RegimeEvalEnv(LeverageTradingEnv):
     def __init__(self, data_path, eval_starts, eval_window=20_000, leverage=2):
         super().__init__(data_path=data_path, leverage=leverage)
@@ -91,6 +116,37 @@ class RegimeEvalEnv(LeverageTradingEnv):
             options['start_step'] = self.eval_starts[self.eval_idx % len(self.eval_starts)]
         if 'max_ep_steps' not in options:
             options['max_ep_steps'] = self.eval_window
+        self.eval_idx += 1
+        return super().reset(seed=seed, options=options)
+
+
+class TrainSliceEnv(LeverageTradingEnv):
+    def __init__(self, data_path, leverage, train_start, train_end, train_ep_steps):
+        super().__init__(data_path=data_path, leverage=leverage)
+        self.train_start = max(0, int(train_start))
+        self.train_end = max(self.train_start, int(train_end))
+        self.train_ep_steps = int(train_ep_steps)
+
+    def reset(self, seed=None, options=None):
+        options = dict(options or {})
+        max_start = max(self.train_start, self.train_end - self.train_ep_steps)
+        start_step = int(self.np_random.integers(self.train_start, max_start + 1))
+        options.setdefault("start_step", start_step)
+        options.setdefault("max_ep_steps", self.train_ep_steps)
+        return super().reset(seed=seed, options=options)
+
+
+class EvalSliceEnv(LeverageTradingEnv):
+    def __init__(self, data_path, eval_starts, eval_window, leverage):
+        super().__init__(data_path=data_path, leverage=leverage)
+        self.eval_starts = list(eval_starts)
+        self.eval_window = int(eval_window)
+        self.eval_idx = 0
+
+    def reset(self, seed=None, options=None):
+        options = dict(options or {})
+        options.setdefault('start_step', self.eval_starts[self.eval_idx % len(self.eval_starts)])
+        options.setdefault('max_ep_steps', self.eval_window)
         self.eval_idx += 1
         return super().reset(seed=seed, options=options)
 
@@ -122,6 +178,11 @@ def train_commander(total_timesteps=5_000_000,
                     leverage=2,
                     load_model_path=None,
                     improved_hp=False,
+                    split_mode="holdout",
+                    train_ratio=0.7,
+                    eval_ratio=0.2,
+                    train_ep_steps=20_000,
+                    eval_window=20_000,
                     model_dir=None,
                     data_path=None):
 
@@ -135,12 +196,62 @@ def train_commander(total_timesteps=5_000_000,
         print("[ERROR] base_signals_log.csv 없음. data 폴더 확인 필요.")
         return
 
-    env = LeverageTradingEnv(data_path=data_path, leverage=leverage)
+    full_env = LeverageTradingEnv(data_path=data_path, leverage=leverage)
+    max_steps = full_env.max_steps
+    train_start, train_end, eval_start, eval_end = _resolve_split_ranges(
+        max_steps=max_steps,
+        split_mode=split_mode,
+        train_ratio=train_ratio,
+        eval_ratio=eval_ratio,
+    )
 
-    eval_starts = _build_regime_eval_starts(max_steps=env.max_steps, eval_window=20_000)
-    eval_env = RegimeEvalEnv(data_path=data_path, eval_starts=eval_starts,
-                             eval_window=20_000, leverage=leverage)
-    print(f"[INFO] 평가 시작점(국면 분할): {eval_starts}")
+    # split이 비정상 구간을 만들면 전체 구간 fallback
+    if (train_end - train_start) < max(1_000, train_ep_steps) or (eval_end - eval_start) < max(1_000, eval_window):
+        print("[WARN] 데이터 분할 구간이 너무 작아 split_mode=none 으로 대체합니다.")
+        split_mode = "none"
+        train_start, train_end, eval_start, eval_end = _resolve_split_ranges(
+            max_steps=max_steps,
+            split_mode=split_mode,
+            train_ratio=train_ratio,
+            eval_ratio=eval_ratio,
+        )
+
+    if split_mode == "none":
+        env = LeverageTradingEnv(data_path=data_path, leverage=leverage)
+        eval_starts = _build_regime_eval_starts(max_steps=env.max_steps, eval_window=eval_window)
+        eval_env = RegimeEvalEnv(data_path=data_path, eval_starts=eval_starts,
+                                 eval_window=eval_window, leverage=leverage)
+        print(f"[INFO] 데이터 분할: none (전체 구간)")
+        print(f"[INFO] 평가 시작점(국면 분할): {eval_starts}")
+    else:
+        env = TrainSliceEnv(
+            data_path=data_path,
+            leverage=leverage,
+            train_start=train_start,
+            train_end=train_end,
+            train_ep_steps=train_ep_steps,
+        )
+        eval_starts = _build_range_eval_starts(
+            start_step=eval_start,
+            end_step=eval_end,
+            eval_window=eval_window,
+            n_points=4,
+        )
+        eval_env = EvalSliceEnv(
+            data_path=data_path,
+            eval_starts=eval_starts,
+            eval_window=eval_window,
+            leverage=leverage,
+        )
+        dt_index = pd.to_datetime(pd.read_csv(data_path, usecols=["datetime"])["datetime"], errors="coerce")
+        def _d(step):
+            if 0 <= step < len(dt_index) and pd.notna(dt_index.iloc[step]):
+                return str(dt_index.iloc[step])
+            return "N/A"
+        print(f"[INFO] 데이터 분할: holdout")
+        print(f"[INFO] train range: {train_start}..{train_end} ({_d(train_start)} ~ {_d(train_end)})")
+        print(f"[INFO] eval range : {eval_start}..{eval_end} ({_d(eval_start)} ~ {_d(eval_end)})")
+        print(f"[INFO] eval 시작점: {eval_starts}")
 
     if model_dir is None:
         model_dir = os.path.join(ROOT_DIR, "models", "commander")
@@ -238,6 +349,16 @@ if __name__ == "__main__":
                         help="파인튜닝할 기존 commander 모델 ZIP 경로")
     parser.add_argument("--improved-hp", action="store_true",
                         help="개선 하이퍼파라미터 (net_arch 확장·lr 감소)")
+    parser.add_argument("--split-mode", type=str, choices=["none", "holdout"], default="holdout",
+                        help="학습/평가 데이터 분할 모드")
+    parser.add_argument("--train-ratio", type=float, default=0.7,
+                        help="holdout 모드 학습 비율 (0~1)")
+    parser.add_argument("--eval-ratio", type=float, default=0.2,
+                        help="holdout 모드 평가 비율 (0~1)")
+    parser.add_argument("--train-ep-steps", type=int, default=20_000,
+                        help="학습 에피소드 길이")
+    parser.add_argument("--eval-window", type=int, default=20_000,
+                        help="평가 에피소드 길이")
     parser.add_argument("--model-dir", type=str, default=None,
                         help="모델 저장 루트 디렉토리 (기본: root/models/commander)")
     parser.add_argument("--data-path", type=str, default=None,
@@ -259,6 +380,11 @@ if __name__ == "__main__":
         leverage=args.leverage,
         load_model_path=args.load_model,
         improved_hp=args.improved_hp,
+        split_mode=args.split_mode,
+        train_ratio=args.train_ratio,
+        eval_ratio=args.eval_ratio,
+        train_ep_steps=args.train_ep_steps,
+        eval_window=args.eval_window,
         model_dir=args.model_dir,
         data_path=args.data_path,
     )

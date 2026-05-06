@@ -17,3 +17,18 @@
 
 자동 모델 태그 규칙:
 - lev{레버리지}_seed{시드}_NNN
+
+R&D 옵션 (run_train.py):
+- `--split-mode holdout` + `--train-ratio` + `--eval-ratio`:
+	학습/평가 구간 분리
+- `--top-k N`:
+	학습 완료 후 candidates 상위 N개만 유지
+
+예시:
+```bash
+python commander/run_train.py \
+	--count 5 --leverage 3 --timesteps 200000 \
+	--split-mode holdout --train-ratio 0.7 --eval-ratio 0.2 \
+	--train-ep-steps 20000 --eval-window 20000 \
+	--top-k 3
+```
