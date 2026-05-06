@@ -119,7 +119,7 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
                     base_seed, seed_step, seeds_csv,
                     model_dir, log_dir, data_path, top_k,
                     split_mode, train_ratio, eval_ratio, train_ep_steps, eval_window,
-                    eval_freq):
+                    eval_freq, no_improve_start_ratio):
     os.makedirs(log_dir, exist_ok=True)
     candidates_dir = os.path.join(model_dir, "candidates")
     _preflight_check(data_path=data_path, model_dir=model_dir)
@@ -154,6 +154,7 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
             "--train-ep-steps", str(train_ep_steps),
             "--eval-window", str(eval_window),
             "--eval-freq", str(eval_freq),
+            "--no-improve-start-ratio", str(no_improve_start_ratio),
             "--model-dir", model_dir,
             "--data-path", data_path,
         ]
@@ -218,6 +219,8 @@ if __name__ == "__main__":
                         help="평가 에피소드 길이")
     parser.add_argument("--eval-freq", type=int, default=10_000,
                         help="EvalCallback 평가 주기 (timesteps 단위)")
+    parser.add_argument("--no-improve-start-ratio", type=float, default=0.2,
+                        help="patience no-improve 체크 시작 비율 (최소 0.2)")
     args = parser.parse_args()
 
     run_train_batch(
@@ -239,4 +242,5 @@ if __name__ == "__main__":
         train_ep_steps=args.train_ep_steps,
         eval_window=args.eval_window,
         eval_freq=args.eval_freq,
+        no_improve_start_ratio=args.no_improve_start_ratio,
     )

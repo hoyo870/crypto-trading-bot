@@ -24,13 +24,19 @@ class SmartStopCallback(BaseCallback):
     3. 목표 달성     : eval reward >= reward_target 이면 종료
     """
     def __init__(self, eval_callback, patience=20, eval_freq=10000,
-                 entropy_threshold=-0.01, reward_target=50.0, verbose=1):
+                 entropy_threshold=-0.01, reward_target=50.0,
+                 total_timesteps=5_000_000, no_improve_start_ratio=0.2,
+                 verbose=1):
         super().__init__(verbose)
         self.eval_callback = eval_callback
         self.patience = patience
         self.eval_freq = eval_freq
         self.entropy_threshold = entropy_threshold
         self.reward_target = reward_target
+        # patience no-improve 카운트는 학습 초반(최소 20%)을 지난 후부터 시작
+        ratio = min(1.0, max(0.2, float(no_improve_start_ratio)))
+        self.no_improve_start_ratio = ratio
+        self.no_improve_check_start_step = max(1, int(total_timesteps * ratio))
         self._no_improve_count = 0
         self._best_reward = -np.inf
 
@@ -54,6 +60,13 @@ class SmartStopCallback(BaseCallback):
             if self.verbose:
                 print(f"[SmartStop] ✅ 개선됨: best_reward={self._best_reward:.2f}")
         else:
+            if self.n_calls < self.no_improve_check_start_step:
+                if self.verbose:
+                    print(
+                        f"[SmartStop] ⏳ 워밍업 구간: no-improve 체크 보류 "
+                        f"({self.n_calls}/{self.no_improve_check_start_step} steps)"
+                    )
+                return True
             self._no_improve_count += 1
             if self.verbose:
                 print(f"[SmartStop] ⚠️  개선 없음 {self._no_improve_count}/{self.patience} "
@@ -173,6 +186,7 @@ def train_commander(total_timesteps=5_000_000,
                     patience=30,
                     reward_target=None,
                     entropy_threshold=-0.01,
+                    no_improve_start_ratio=0.2,
                     seed=42,
                     model_tag=None,
                     leverage=2,
@@ -313,6 +327,8 @@ def train_commander(total_timesteps=5_000_000,
         eval_freq=eval_freq,
         entropy_threshold=entropy_threshold,
         reward_target=(float("inf") if reward_target is None else reward_target),
+        total_timesteps=total_timesteps,
+        no_improve_start_ratio=no_improve_start_ratio,
     )
 
     print(f"[INFO] 모델 태그: {final_tag} | 레버리지: {int(leverage)}x")
@@ -338,6 +354,8 @@ if __name__ == "__main__":
     parser.add_argument("--eval-freq", type=int, default=10_000)
     parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--entropy-threshold", type=float, default=-0.01)
+    parser.add_argument("--no-improve-start-ratio", type=float, default=0.2,
+                        help="patience no-improve 체크 시작 비율 (최소 0.2)")
     parser.add_argument("--reward-target", type=float, default=1e9,
                         help="목표 eval reward (매우 크게 설정 시 사실상 비활성)")
     parser.add_argument("--seed", type=int, default=42)
@@ -375,6 +393,7 @@ if __name__ == "__main__":
         patience=args.patience,
         reward_target=reward_target,
         entropy_threshold=args.entropy_threshold,
+        no_improve_start_ratio=args.no_improve_start_ratio,
         seed=args.seed,
         model_tag=args.tag,
         leverage=args.leverage,
