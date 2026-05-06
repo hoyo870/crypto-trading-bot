@@ -175,7 +175,7 @@ class CryptoTradingEnv(gym.Env):
         #    계수 0.01: 20% DD → 0.001/step, 20,000스텝 × 0.001 = 20 (매우 약한 패널티)
         drawdown = (self.peak_balance - self.balance) / (self.peak_balance + 1e-8)
         if drawdown > DD_THRESHOLD:
-            reward -= (drawdown - DD_THRESHOLD) * 0.01
+            reward -= (drawdown - DD_THRESHOLD) * 0.001
 
         # ⑥ per-step 보상 클리핑: 이상치 방지 (critic 안정화)
         reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))

@@ -16,7 +16,7 @@ class SmartStopCallback(BaseCallback):
     3. 목표 달성     : eval reward >= reward_target 이면 종료
     """
     def __init__(self, eval_callback,
-                 patience=10,
+                 patience=20,
                  eval_freq=10000,
                  entropy_threshold=-0.01,
                  reward_target=50.0,
@@ -176,7 +176,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train RL Commander with smart stop")
     parser.add_argument("--total-timesteps", type=int, default=3000000)
     parser.add_argument("--eval-freq", type=int, default=10000)
-    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--entropy-threshold", type=float, default=-0.01)
     parser.add_argument("--reward-target", type=float, default=50.0,
                         help="Set to a high value (e.g. 1e9) to effectively disable")
