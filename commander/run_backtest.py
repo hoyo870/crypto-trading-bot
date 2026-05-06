@@ -2,25 +2,52 @@
 Commander 일괄 백테스트 실행기
 
 사용법:
-  python run_backtest.py                          # 기본(전체 candidates, leverage=2)
-  python run_backtest.py --leverage 3             # 3배 레버리지
+    python run_backtest.py                          # 기본(전체 candidates, 태그의 leverage 사용)
+    python run_backtest.py --tags lev3_seed42_001   # 태그의 leverage 사용
     python run_backtest.py --tags lev2_seed42_001,lev2_seed43_001 --leverage 2
 """
 import os
 import sys
 import subprocess
 import argparse
+import re
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
 
 
-def run_backtest_all(tags, leverage, model_dir, log_dir, data_path, reports_dir):
+def _infer_leverage_from_tag(tag):
+    match = re.match(r"^lev(\d+)_", str(tag).strip().lower())
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _resolve_leverage(tag, leverage_override):
+    inferred = _infer_leverage_from_tag(tag)
+    if leverage_override is not None:
+        if inferred is not None and inferred != leverage_override:
+            print(
+                f"[WARN] tag={tag} 에 포함된 leverage={inferred}x 와 "
+                f"--leverage={leverage_override}x 가 다릅니다. override 값을 사용합니다."
+            )
+        return leverage_override
+    if inferred is None:
+        print(
+            f"[WARN] tag={tag} 에서 leverage를 추론할 수 없어 기본값 1x 를 사용합니다. "
+            "가능하면 lev3_seed42_001 형식의 태그를 사용하세요."
+        )
+        return 1
+    return inferred
+
+
+def run_backtest_all(tags, leverage_override, model_dir, log_dir, data_path, reports_dir):
     os.makedirs(log_dir, exist_ok=True)
 
     results = []
     for i, tag in enumerate(tags, start=1):
+        leverage = _resolve_leverage(tag, leverage_override)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_path = os.path.join(log_dir, f"backtest_{i:02d}_{tag}_{ts}.log")
 
@@ -68,8 +95,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Commander 일괄 백테스트")
     parser.add_argument("--tags", type=str, default=None,
                         help="쉼표 구분 태그 (미지정 시 candidates 전체)")
-    parser.add_argument("--leverage", type=int, default=2,
-                        help="레버리지 배수 (기본 2)")
+    parser.add_argument("--leverage", type=int, default=None,
+                        help="레버리지 배수 override (미지정 시 태그에서 자동 추론)")
     parser.add_argument("--model-dir", type=str,
                         default=os.path.join(ROOT_DIR, "models", "commander"),
                         help="모델 루트 디렉토리")
@@ -95,7 +122,7 @@ if __name__ == "__main__":
 
     run_backtest_all(
         tags=tags,
-        leverage=args.leverage,
+        leverage_override=args.leverage,
         model_dir=args.model_dir,
         log_dir=args.log_dir,
         data_path=args.data_path,
