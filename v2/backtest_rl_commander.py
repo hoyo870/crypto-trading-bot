@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -33,6 +34,34 @@ def _resolve_model_path(model_path=None, model_tag=None):
         return candidates_path
 
     return os.path.join(model_dir, "best_model.zip")
+
+
+def _resolve_model_paths(model_paths=None, model_tags=None):
+    paths = []
+    if model_paths:
+        for path in model_paths:
+            if not os.path.isabs(path):
+                path = os.path.join(BASE_DIR, path)
+            paths.append(path)
+        return paths
+
+    if model_tags:
+        for tag in model_tags:
+            paths.append(_resolve_model_path(model_tag=tag))
+        return paths
+
+    return [_resolve_model_path()]
+
+
+def _majority_vote(actions):
+    # 동률이면 관망(0)으로 보수적 처리
+    counts = {}
+    for a in actions:
+        counts[a] = counts.get(a, 0) + 1
+    ranked = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+    if len(ranked) >= 2 and ranked[0][1] == ranked[1][1]:
+        return 0
+    return ranked[0][0]
 
 
 def _load_all_datetimes(data_path):
@@ -104,26 +133,34 @@ def _write_trade_report(report_path, model_path, summary, trades):
         f.write("\n".join(lines) + "\n")
 
 
-def run_rl_backtest(model_path=None, model_tag=None, output_suffix=""):
+def run_rl_backtest(model_path=None, model_tag=None, output_suffix="", ensemble_tags=None):
     print(f"\n{'='*50}")
     print(f"📈 3차 사령관 (RL Commander) 실전 백테스트 시작")
     print(f"{'='*50}")
 
-    model_path = _resolve_model_path(model_path=model_path, model_tag=model_tag)
+    if ensemble_tags:
+        tags = [t.strip() for t in ensemble_tags.split(",") if t.strip()]
+        model_paths = _resolve_model_paths(model_tags=tags)
+    else:
+        model_paths = _resolve_model_paths(model_paths=[model_path] if model_path else None,
+                                           model_tags=[model_tag] if model_tag else None)
 
     data_path = os.path.join(BASE_DIR, "data", "base_signals_log.csv")
     all_time_index = _load_all_datetimes(data_path)
 
-    if not os.path.exists(model_path):
-        print(f"[ERROR] 모델 파일이 없습니다: {model_path}")
-        return
+    for path in model_paths:
+        if not os.path.exists(path):
+            print(f"[ERROR] 모델 파일이 없습니다: {path}")
+            return
 
     # 1. 평가용 환경 로드 (전체 데이터 기간, start_step=0 고정)
     env = CryptoTradingEnv(data_path=data_path)
 
     # 2. 훈련된 사령관 로드
     print("[INFO] 최고 성능의 사령관 뇌를 이식 중...")
-    model = PPO.load(model_path)
+    models = [PPO.load(path) for path in model_paths]
+    if len(models) > 1:
+        print(f"[INFO] 앙상블 모드: {len(models)}개 모델 다수결")
 
     # 백테스트는 항상 step 0부터 전체 데이터를 순서대로 평가
     obs, _ = env.reset(options={'start_step': 0, 'max_ep_steps': None})
@@ -144,12 +181,16 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix=""):
         pre_price = float(env.closes[pre_step])
 
         # 결정론적 행동 선택
-        action, _states = model.predict(obs, deterministic=True)
-        act_val = int(action) if action.ndim == 0 else int(action[0])
+        votes = []
+        for model in models:
+            action, _states = model.predict(obs, deterministic=True)
+            act = int(action) if np.ndim(action) == 0 else int(action[0])
+            votes.append(act)
+        act_val = votes[0] if len(votes) == 1 else _majority_vote(votes)
         can_enter = (env.position == 0)
         
         # Gymnasium 표준 5-tuple 반환
-        obs, reward, terminated, truncated, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(act_val)
         done = terminated or truncated
         
         balances.append(env.balance)
@@ -283,7 +324,8 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix=""):
     print(f"\n[INFO] 📈 결과 차트가 '{save_fig_path}' 파일로 저장되었습니다!")
 
     report_path = os.path.join(reports_dir, report_name)
-    _write_trade_report(report_path=report_path, model_path=model_path, summary=summary, trades=trades)
+    model_desc = ", ".join(model_paths) if len(model_paths) > 1 else model_paths[0]
+    _write_trade_report(report_path=report_path, model_path=model_desc, summary=summary, trades=trades)
     print(f"[INFO] 📝 상세 리포트가 '{report_path}' 파일로 저장되었습니다!")
 
 if __name__ == "__main__":
@@ -292,10 +334,13 @@ if __name__ == "__main__":
                         help="Absolute path or v2-relative path of RL model zip")
     parser.add_argument("--model-tag", type=str, default=None,
                         help="Short tag in models/rl_commander/candidates, e.g. m001")
+    parser.add_argument("--ensemble-tags", type=str, default=None,
+                        help="Comma-separated tags for ensemble voting, e.g. m010,m002")
     parser.add_argument("--suffix", type=str, default="",
                         help="Output image suffix. e.g. seed42")
     args = parser.parse_args()
 
     run_rl_backtest(model_path=args.model_path,
                     model_tag=args.model_tag,
-                    output_suffix=args.suffix)
+                    output_suffix=args.suffix,
+                    ensemble_tags=args.ensemble_tags)

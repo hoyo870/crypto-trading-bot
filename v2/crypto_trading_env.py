@@ -6,6 +6,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ── 하이퍼파라미터 ───────────────────────────────────────────────
+MIN_HOLD_STEPS  = 12     # 최소 보유 시간: 1시간 (12스텝)
 MAX_HOLD_STEPS  = 2016   # 강제 청산 한도: 1주 (7일 × 288스텝/일)
 HOLD_BASE_STEPS = 288    # 보유 패널티 시작: 24시간
 SHARPE_WINDOW   = 50     # Sharpe 계산용 최근 거래 수
@@ -13,6 +14,10 @@ DD_THRESHOLD    = 0.10   # 드로우다운 패널티 발동 기준: -10%
 MIN_EP_STEPS    = 10_000 # 에피소드 최소 잔여 스텝 (랜덤 시작 상한)
 MAX_EP_STEPS    = 20_000 # 에피소드 최대 길이 (약 70일): 보상 누적 폭발 방지
 REWARD_CLIP     = 10.0   # per-step 보상 클리핑 범위
+IMBALANCE_FREE_BAND = 0.60  # Long/Short 불균형 허용 구간
+IMBALANCE_PENALTY_COEF = 0.30
+TAIL_LOSS_THRESHOLD = 0.01  # 순손실 1% 초과분부터 꼬리손실 패널티
+TAIL_LOSS_COEF = 0.20
 # ────────────────────────────────────────────────────────────────
 
 
@@ -77,6 +82,8 @@ class CryptoTradingEnv(gym.Env):
         self.entry_step   = 0
         self.total_trades = 0
         self.win_trades   = 0
+        self.long_entries = 0
+        self.short_entries = 0
         self.recent_returns = []   # Sharpe 계산 버퍼 (float 리스트)
         return self._get_obs(), {}
 
@@ -117,18 +124,36 @@ class CryptoTradingEnv(gym.Env):
         if self.position != 0 and hold_steps >= MAX_HOLD_STEPS:
             action = 3
 
+        # 최소 보유 시간 전 청산은 무효 처리 (조기 청산 남용 방지)
+        if action == 3 and self.position != 0 and hold_steps < MIN_HOLD_STEPS:
+            action = 0
+            reward -= 0.02
+
         # ── 행동 처리 ──
         if action == 1 and self.position == 0:          # Long 진입
             self.position    = 1
             self.entry_price = current_price
             self.entry_step  = self.current_step
             self.balance    *= (1 - self.fee_rate)
+            self.long_entries += 1
+
+            # Long/Short 행동 불균형이 과도하면 진입 시 페널티
+            total_entries = self.long_entries + self.short_entries
+            imbalance = abs(self.long_entries - self.short_entries) / max(1, total_entries)
+            if total_entries >= 10 and imbalance > IMBALANCE_FREE_BAND:
+                reward -= (imbalance - IMBALANCE_FREE_BAND) * IMBALANCE_PENALTY_COEF
 
         elif action == 2 and self.position == 0:        # Short 진입
             self.position    = -1
             self.entry_price = current_price
             self.entry_step  = self.current_step
             self.balance    *= (1 - self.fee_rate)
+            self.short_entries += 1
+
+            total_entries = self.long_entries + self.short_entries
+            imbalance = abs(self.long_entries - self.short_entries) / max(1, total_entries)
+            if total_entries >= 10 and imbalance > IMBALANCE_FREE_BAND:
+                reward -= (imbalance - IMBALANCE_FREE_BAND) * IMBALANCE_PENALTY_COEF
 
         elif action == 3 and self.position != 0:        # 청산
             if self.position == 1:
@@ -151,12 +176,13 @@ class CryptoTradingEnv(gym.Env):
 
             if net_ret > 0:
                 self.win_trades += 1
-                base_reward = (net_ret * 100.0) + 2.0
-                # ③ Long 편향 보정: Long 수익 청산 시 추가 보너스
-                long_bonus  = 0.5 if self.position == 1 else 0.0
-                reward = base_reward + long_bonus + sharpe_bonus
+                base_reward = (net_ret * 100.0) + 1.0
+                reward = base_reward + sharpe_bonus
             else:
-                reward = (net_ret * 100.0) - 1.0 + sharpe_bonus
+                # 꼬리손실(큰 손실)에 비선형 패널티를 더해 손익비 중심으로 유도
+                tail_loss = max(0.0, abs(net_ret) - TAIL_LOSS_THRESHOLD)
+                tail_penalty = ((tail_loss * 100.0) ** 2) * TAIL_LOSS_COEF
+                reward = (net_ret * 100.0) - 1.5 + sharpe_bonus - tail_penalty
 
             self.position = 0
             self.peak_balance = max(self.peak_balance, self.balance)

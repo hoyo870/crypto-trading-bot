@@ -80,6 +80,32 @@ class SmartStopCallback(BaseCallback):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _build_regime_eval_starts(max_steps, eval_window=20_000):
+    # 상승/하락/횡보가 섞이도록 전체 기간을 4개 구간으로 분할해 고정 시작점 사용
+    anchors = [0.0, 0.25, 0.50, 0.75]
+    max_start = max(0, max_steps - eval_window)
+    starts = [min(max_start, int(max_steps * q)) for q in anchors]
+    starts = sorted(set(starts))
+    return starts or [0]
+
+
+class RegimeEvalEnv(CryptoTradingEnv):
+    def __init__(self, data_path, eval_starts, eval_window=20_000):
+        super().__init__(data_path=data_path)
+        self.eval_starts = list(eval_starts)
+        self.eval_window = eval_window
+        self.eval_idx = 0
+
+    def reset(self, seed=None, options=None):
+        options = dict(options or {})
+        if 'start_step' not in options:
+            options['start_step'] = self.eval_starts[self.eval_idx % len(self.eval_starts)]
+        if 'max_ep_steps' not in options:
+            options['max_ep_steps'] = self.eval_window
+        self.eval_idx += 1
+        return super().reset(seed=seed, options=options)
+
+
 def _normalize_tag(tag):
     clean = re.sub(r"[^a-zA-Z0-9_-]", "", str(tag)).lower()
     return clean or None
@@ -114,8 +140,10 @@ def train_commander(total_timesteps=3000000,
     # 환경 생성 (훈련용: 랜덤 시작점으로 전체 기간 탐색)
     env = CryptoTradingEnv(data_path=data_path)
 
-    # 평가 환경 생성 (훈련 env와 동일 전체 데이터, 랜덤 시작 → 일반화 측정)
-    eval_env = CryptoTradingEnv(data_path=data_path)
+    # 평가 환경 생성 (시장 국면별 고정 시작점으로 일반화 성능 측정)
+    eval_starts = _build_regime_eval_starts(max_steps=env.max_steps, eval_window=20_000)
+    eval_env = RegimeEvalEnv(data_path=data_path, eval_starts=eval_starts, eval_window=20_000)
+    print(f"[INFO] 평가 시작점(국면 분할): {eval_starts}")
 
     # 사령관의 뇌(Policy) 구조: 은닉층 128, 64의 신경망
     policy_kwargs = dict(net_arch=[128, 64])
@@ -147,7 +175,8 @@ def train_commander(total_timesteps=3000000,
 
     eval_callback = EvalCallback(eval_env, best_model_save_path=run_dir,
                                  log_path=run_dir, eval_freq=eval_freq,
-                                 deterministic=True, render=False)
+                                 deterministic=True, render=False,
+                                 n_eval_episodes=len(eval_starts))
 
     smart_stop = SmartStopCallback(
         eval_callback=eval_callback,
