@@ -10,8 +10,8 @@ def run_sequential_trainings():
     # 실행할 (count, leverage) 작업 목록
     tasks = [
         (7, 1),
-        (7, 3),
-        (7, 5)
+        (8, 3),
+        (10, 5)
     ]
 
     print(f"\n{'='*60}")
