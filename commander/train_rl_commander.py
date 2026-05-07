@@ -33,8 +33,8 @@ class SmartStopCallback(BaseCallback):
         self.eval_freq = eval_freq
         self.entropy_threshold = entropy_threshold
         self.reward_target = reward_target
-        # patience no-improve 카운트는 학습 초반(최소 20%)을 지난 후부터 시작
-        ratio = min(1.0, max(0.2, float(no_improve_start_ratio)))
+        # patience no-improve 카운트는 학습 초반(최소 10%)을 지난 후부터 시작
+        ratio = min(1.0, max(0.1, float(no_improve_start_ratio)))
         self.no_improve_start_ratio = ratio
         self.no_improve_check_start_step = max(1, int(total_timesteps * ratio))
         self._no_improve_count = 0

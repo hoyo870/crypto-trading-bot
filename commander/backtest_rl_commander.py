@@ -241,9 +241,7 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
             net_ret = ((env.balance - open_trade["entry_equity"]) /
                        max(open_trade["entry_equity"], 1e-8))
 
-            if info.get('hard_stop_loss'):
-                exit_type = "hard_stop_loss"
-            elif info.get('stop_loss'):
+            if info.get('stop_loss'):
                 exit_type = "stop_loss"
             elif done:
                 exit_type = "forced"
