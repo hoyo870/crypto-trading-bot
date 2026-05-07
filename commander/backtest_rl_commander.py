@@ -173,7 +173,6 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
 
     done = False
     balances = [env.balance]
-    entry_actions = []
     trades = []
     open_trade = None
     liq_steps = []  # 청산 발생 step (차트 표시용)
@@ -183,7 +182,7 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
     while not done:
         pre_step = env.current_step
         pre_position = env.position
-        pre_price = float(env.closes[pre_step])
+        pre_price = float(env.closes[min(pre_step, env.max_steps - 1)])
 
         votes = []
         for model in models:
@@ -192,19 +191,16 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
             votes.append(act)
         act_val = votes[0] if len(votes) == 1 else _majority_vote(votes)
 
-        can_enter = (env.position == 0)
         obs, reward, terminated, truncated, info = env.step(act_val)
         done = terminated or truncated
 
         balances.append(env.balance)
 
-        if can_enter and act_val in [1, 2]:
-            entry_actions.append(act_val)
-
-        # 청산(Liquidation) 감지
+        # ── 청산(Liquidation) 감지 ──────────────────────────────
         if info.get('liquidated') and pre_position != 0:
             liq_steps.append(pre_step)
             if open_trade is not None:
+                gross_pct = -100.0 / leverage
                 trades.append({
                     "side": open_trade["side"],
                     "entry_time": open_trade["entry_time"],
@@ -214,28 +210,38 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
                     "holding_steps": pre_step - open_trade["entry_step"],
                     "entry_price": open_trade["entry_price"],
                     "exit_price": pre_price,
-                    "gross_return_pct": -100.0 / leverage,
-                    "net_return_pct": -100.0 / leverage,
+                    "gross_return_pct": gross_pct,
+                    "net_return_pct": gross_pct,
                     "exit_type": "liquidated",
                 })
                 open_trade = None
 
-        # 진입 기록
-        if pre_position == 0 and act_val in [1, 2]:
+        # ── 진입 기록 (v4: 1=long_full, 2=long_half, 3=short_full, 4=short_half) ──
+        if pre_position == 0 and env.position != 0:
             open_trade = {
-                "side": "LONG" if act_val == 1 else "SHORT",
+                "side": "LONG" if env.position == 1 else "SHORT",
+                "margin_size": env.position_size,
                 "entry_step": pre_step,
                 "entry_time": _step_to_dt_str(pre_step, all_time_index),
                 "entry_price": pre_price,
             }
 
-        # 수동 청산
-        if pre_position != 0 and act_val == 3 and open_trade is not None:
+        # ── 포지션 청산 감지 (manual / stop_loss / forced) ────────
+        if pre_position != 0 and env.position == 0 \
+                and not info.get('liquidated') and open_trade is not None:
             if pre_position == 1:
                 gross_ret = (pre_price - open_trade["entry_price"]) / open_trade["entry_price"] * leverage
             else:
                 gross_ret = (open_trade["entry_price"] - pre_price) / open_trade["entry_price"] * leverage
             net_ret = gross_ret - (env.fee_rate * leverage * 2)
+
+            if info.get('stop_loss'):
+                exit_type = "stop_loss"
+            elif done:
+                exit_type = "forced"
+            else:
+                exit_type = "manual"
+
             trades.append({
                 "side": open_trade["side"],
                 "entry_time": open_trade["entry_time"],
@@ -247,13 +253,12 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
                 "exit_price": pre_price,
                 "gross_return_pct": gross_ret * 100.0,
                 "net_return_pct": net_ret * 100.0,
-                "exit_type": "manual",
+                "exit_type": exit_type,
             })
             open_trade = None
 
-        # 에피소드 종료 강제청산
-        if done and pre_position != 0 and act_val != 3 and open_trade is not None \
-                and not info.get('liquidated'):
+        # ── 에피소드 종료 시 미청산 포지션 강제 정리 ──────────────
+        if done and open_trade is not None and not info.get('liquidated'):
             forced_step = min(env.current_step, env.max_steps - 1)
             forced_price = float(env.closes[forced_step])
             if pre_position == 1:
@@ -283,8 +288,8 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
     win_rate = info.get('win_rate', 0.0)
     was_liquidated = info.get('liquidated', False)
 
-    long_count = entry_actions.count(1)
-    short_count = entry_actions.count(2)
+    long_count  = sum(1 for t in trades if t['side'] == 'LONG')
+    short_count = sum(1 for t in trades if t['side'] == 'SHORT')
     mdd = _calc_mdd(balances)
     sharpe = _calc_sharpe(balances)
 

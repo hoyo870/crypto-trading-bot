@@ -285,8 +285,8 @@ def train_commander(total_timesteps=5_000_000,
             print(f"[ERROR] 로드할 모델 파일 없음: {load_model_path}")
             return
         print(f"[INFO] 🔄 파인튜닝 모드: {load_model_path} 로드")
-        # 구버전 9차원 obs 모델은 현재 10차원 환경에 직접 로드할 수 없음
-        # 파인튜닝은 같은 obs 차원의 commander 모델에만 적용 가능
+        # obs 13차원 / action 6차원 (v4 환경) 기준으로 학습된 모델에만 파인튜닝 적용 가능
+        # 구버전(obs 10/9차원, action 4차원) 모델과 호환 불가
         model = PPO.load(load_model_path, env=env, device="auto",
                          custom_objects={
                              "learning_rate": 1e-4,
@@ -296,8 +296,9 @@ def train_commander(total_timesteps=5_000_000,
                          })
         print(f"[INFO] 파인튜닝 hp: lr=1e-4, ent_coef=0.005, n_steps=4096, batch=128")
     elif improved_hp:
-        policy_kwargs = dict(net_arch=[256, 128, 64])
-        print(f"[INFO] 🆕 개선 hp 모드: net_arch=[256,128,64], lr=1e-4")
+        # obs 13차원 + action 6차원에 맞게 네트워크 확장
+        policy_kwargs = dict(net_arch=[256, 256, 128])
+        print(f"[INFO] 🆕 개선 hp 모드: net_arch=[256,256,128], lr=1e-4")
         model = PPO("MlpPolicy", env, verbose=1, policy_kwargs=policy_kwargs,
                     learning_rate=1e-4,
                     ent_coef=0.005,
@@ -306,8 +307,8 @@ def train_commander(total_timesteps=5_000_000,
                     batch_size=128,
                     seed=seed)
     else:
-        policy_kwargs = dict(net_arch=[128, 64])
-        print(f"[INFO] 기본 hp 모드: net_arch=[128,64], lr=3e-4")
+        policy_kwargs = dict(net_arch=[256, 128])
+        print(f"[INFO] 기본 hp 모드: net_arch=[256,128], lr=3e-4")
         model = PPO("MlpPolicy", env, verbose=1, policy_kwargs=policy_kwargs,
                     learning_rate=3e-4,
                     ent_coef=0.01,
