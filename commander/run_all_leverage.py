@@ -9,9 +9,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 def run_sequential_trainings():
     # 실행할 (count, leverage) 작업 목록
     tasks = [
-        (7, 1),
-        (8, 3),
-        (10, 5)
+        (2, 1),
+        (2, 3),
+        (2, 5)
     ]
 
     print(f"\n{'='*60}")
@@ -29,7 +29,8 @@ def run_sequential_trainings():
             os.path.join(BASE_DIR, "run_train.py"),
             "--count", str(count),
             "--leverage", str(leverage),
-            "--seeds", ",".join(str(random.randint(0, 10000)) for _ in range(count))
+            "--seeds", ",".join(str(random.randint(0, 10000)) for _ in range(count)),
+            "--no-improve-start-ratio", "0.1"
         ]
 
         # 명령어 실행 (터미널 출력은 그대로 화면에 보여줌)

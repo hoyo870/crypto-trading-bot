@@ -182,6 +182,7 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
     while not done:
         pre_step = env.current_step
         pre_position = env.position
+        pre_balance = env.balance
         pre_price = float(env.closes[min(pre_step, env.max_steps - 1)])
 
         votes = []
@@ -200,7 +201,9 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
         if info.get('liquidated') and pre_position != 0:
             liq_steps.append(pre_step)
             if open_trade is not None:
-                gross_pct = -100.0 / leverage
+                gross_pct = -100.0 * open_trade["margin_size"]
+                net_pct = ((env.balance - open_trade["entry_equity"]) /
+                           max(open_trade["entry_equity"], 1e-8)) * 100.0
                 trades.append({
                     "side": open_trade["side"],
                     "entry_time": open_trade["entry_time"],
@@ -211,7 +214,7 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
                     "entry_price": open_trade["entry_price"],
                     "exit_price": pre_price,
                     "gross_return_pct": gross_pct,
-                    "net_return_pct": gross_pct,
+                    "net_return_pct": net_pct,
                     "exit_type": "liquidated",
                 })
                 open_trade = None
@@ -221,6 +224,7 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
             open_trade = {
                 "side": "LONG" if env.position == 1 else "SHORT",
                 "margin_size": env.position_size,
+                "entry_equity": pre_balance,
                 "entry_step": pre_step,
                 "entry_time": _step_to_dt_str(pre_step, all_time_index),
                 "entry_price": pre_price,
@@ -233,9 +237,13 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
                 gross_ret = (pre_price - open_trade["entry_price"]) / open_trade["entry_price"] * leverage
             else:
                 gross_ret = (open_trade["entry_price"] - pre_price) / open_trade["entry_price"] * leverage
-            net_ret = gross_ret - (env.fee_rate * leverage * 2)
+            gross_ret *= open_trade["margin_size"]
+            net_ret = ((env.balance - open_trade["entry_equity"]) /
+                       max(open_trade["entry_equity"], 1e-8))
 
-            if info.get('stop_loss'):
+            if info.get('hard_stop_loss'):
+                exit_type = "hard_stop_loss"
+            elif info.get('stop_loss'):
                 exit_type = "stop_loss"
             elif done:
                 exit_type = "forced"
@@ -265,7 +273,9 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
                 gross_ret = (forced_price - open_trade["entry_price"]) / open_trade["entry_price"] * leverage
             else:
                 gross_ret = (open_trade["entry_price"] - forced_price) / open_trade["entry_price"] * leverage
-            net_ret = gross_ret - (env.fee_rate * leverage * 2)
+            gross_ret *= open_trade["margin_size"]
+            net_ret = ((env.balance - open_trade["entry_equity"]) /
+                       max(open_trade["entry_equity"], 1e-8))
             trades.append({
                 "side": open_trade["side"],
                 "entry_time": open_trade["entry_time"],

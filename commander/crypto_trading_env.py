@@ -19,19 +19,18 @@ IMBALANCE_FREE_BAND    = 0.60
 IMBALANCE_PENALTY_COEF = 1.0   # 롱/숏 편향 패널티 계수 (v3 0.30 → 1.0)
 TAIL_LOSS_THRESHOLD    = 0.01  # 꼬리손실 패널티 발동 순손실 기준
 TAIL_LOSS_COEF         = 0.20
+TRAILING_REWARD_COEF   = 0.1   # 수익 중 홀드 트레일링 보상 계수 (과대보상 방지)
 
 # ── 스톱로스 & 손익비 ────────────────────────────────────────────
-# 스톱로스: 마진의 STOP_LOSS_RATIO 소진 시 강제 청산
-#   raw_ret <= -(STOP_LOSS_RATIO / leverage)
-#   예) 5x: -10% raw, 3x: -16.7% raw, 1x: -50% raw
-STOP_LOSS_RATIO = 0.50          # 마진 50% 손실 시 스톱
 
-# 손익비 보상: raw_ret >= SL 거리 × RR_TARGET 이면 계단식 보너스
-#   1:2 (RR_TARGET=2.0): TP raw = SL_raw × 2
-#   1:3 (RR_TIER2=3.0) : 추가 보너스
-RR_TARGET   = 2.0               # 1:2 손익비 목표
-RR_TIER2    = 3.0               # 1:3 손익비 추가 보너스 발동 기준
-RR_BONUS_COEF = 1.5             # RR 달성 보너스 계수
+# 손익비 보상은 스톱로스 거리와 분리한다.
+# 학습 신호는 "원시 가격 이동 raw_ret" 기준의 고정 위험 단위로 측정한다.
+#   RR_RISK_UNIT_RAW=1% 이면,
+#   1:2 달성 = +2% raw, 1:3 달성 = +3% raw
+RR_RISK_UNIT_RAW = 0.01         # RR 계산의 기준 위험 단위: 1% raw move
+RR_TARGET        = 2.0          # 1:2 손익비 목표
+RR_TIER2         = 3.0          # 1:3 손익비 추가 보너스 발동 기준
+RR_BONUS_COEF    = 1.5          # RR 달성 보너스 계수
 
 # ── 미실현 손실 per-step 패널티 ──────────────────────────────────
 UNREALIZED_LOSS_THRESHOLD = 0.05  # 레버리지 적용 손실 5% 초과부터
@@ -53,7 +52,7 @@ class LeverageTradingEnv(gym.Env):
     레버리지 선물 거래 환경 (v4)
 
     v3 대비 변경 사항:
-    ① 하드 스톱로스        : raw_ret <= -SL_RATIO/lev 에서 강제 청산 (마진 50% 손실)
+    ① 하드 스톱로스        : raw_ret <= -hard_sl_pct 에서 강제 청산 (기본 2% raw)
     ② MAX_HOLD 레버리지 비례: max(288, 2016 / leverage)
     ③ 미실현손실 per-step  : 레버리지 손실 5% 초과 시 매 스텝 패널티
     ④ DD 패널티 10배 강화  : 계수 0.001 → 0.01
@@ -68,7 +67,8 @@ class LeverageTradingEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
     def __init__(self, data_path, initial_balance=10000.0,
-                 fee_rate=0.0005, leverage=DEFAULT_LEVERAGE, mode=None):
+                 fee_rate=0.0005, leverage=DEFAULT_LEVERAGE,
+                 hard_sl_pct=0.02, mode=None):
         super().__init__()
         self.initial_balance = initial_balance
         self.fee_rate        = fee_rate
@@ -76,16 +76,16 @@ class LeverageTradingEnv(gym.Env):
 
         # 청산 임계치: raw_ret <= -1/leverage (마진 100% 소진)
         self.liq_threshold = -1.0 / self.leverage
-        # 스톱로스 임계치: raw_ret <= -STOP_LOSS_RATIO/leverage (마진 50% 소진)
-        self.sl_threshold  = -(STOP_LOSS_RATIO / self.leverage)
-        # TP 기준 raw_ret: SL 거리 × RR_TARGET (1:2)
-        self.rr_tp_raw     = abs(self.sl_threshold) * RR_TARGET
+        self.hard_sl_pct   = float(hard_sl_pct)   # 절대 강제 손절 기준 (raw, 기본 2%)
+        # TP 기준 raw_ret: 고정 위험 단위 × RR_TARGET (1:2)
+        self.rr_tp_raw     = RR_RISK_UNIT_RAW * RR_TARGET
 
         # 레버리지 비례 최대 보유 스텝 (1x:2016, 3x:672, 5x:403)
         self.max_hold_steps = max(288, int(MAX_HOLD_STEPS_BASE / self.leverage))
 
         print(f"[INFO] LeverageTradingEnv v4  lev={int(self.leverage)}x  "
-              f"SL={abs(self.sl_threshold)*100:.1f}%raw  "
+              f"HardSL={self.hard_sl_pct*100:.1f}%raw  "
+              f"RR_unit={RR_RISK_UNIT_RAW*100:.1f}%raw  "
               f"TP(1:2)={self.rr_tp_raw*100:.1f}%raw  "
               f"max_hold={self.max_hold_steps}bars")
 
@@ -255,12 +255,10 @@ class LeverageTradingEnv(gym.Env):
                 }
                 return self._get_obs(), float(reward), terminated, truncated, info
 
-            # 마진 50% 소진 → 하드 스톱로스 청산
-            if raw_ret_now <= self.sl_threshold:
+            # 절대 강제 손절: raw 손실 hard_sl_pct 초과 → reward -5.0
+            if raw_ret_now <= -self.hard_sl_pct:
                 net_ret = self._close_position(raw_ret_now)
-                tail_p  = ((abs(net_ret) * 100.0) ** 1.5) * TAIL_LOSS_COEF
-                reward  = float(np.clip((net_ret * 100.0) - 2.0 - tail_p,
-                                        -REWARD_CLIP, REWARD_CLIP))
+                reward  = min(-5.0, (net_ret * 100.0) - 3.0)
                 self.current_step += 1
                 ep_steps = self.current_step - self.start_step
                 if self.balance <= 0:
@@ -270,14 +268,14 @@ class LeverageTradingEnv(gym.Env):
                 elif self.max_episode_steps is not None and ep_steps >= self.max_episode_steps:
                     truncated = True
                 info = {
-                    'stop_loss': True,
+                    'hard_stop_loss': True,
                     'final_balance': self.balance,
                     'total_trades':  self.total_trades,
                     'win_rate': (self.win_trades / self.total_trades * 100)
                                 if self.total_trades > 0 else 0.0,
                     'liquidated': self.liquidated,
                 }
-                return self._get_obs(), reward, terminated, truncated, info
+                return self._get_obs(), float(reward), terminated, truncated, info
 
         # ── ② 최대 보유 도달 → 강제 청산 액션 ─────────────────────
         if self.position != 0 and hold_steps >= self.max_hold_steps:
@@ -334,7 +332,7 @@ class LeverageTradingEnv(gym.Env):
             if net_ret > 0:
                 base_reward = (net_ret * 100.0) + 1.0
                 # ── 손익비 보상 (1:2 / 1:3 계단식) ──────────────
-                rr_achieved = abs(raw_ret) / (abs(self.sl_threshold) + 1e-8)
+                rr_achieved = abs(raw_ret) / (RR_RISK_UNIT_RAW + 1e-8)
                 if rr_achieved >= RR_TIER2:      # 1:3 달성
                     rr_bonus = (rr_achieved - RR_TIER2 + 2.0) * RR_BONUS_COEF
                 elif rr_achieved >= RR_TARGET:   # 1:2 달성
@@ -349,21 +347,25 @@ class LeverageTradingEnv(gym.Env):
 
         elif action == 0:                                    # 홀드
             if self.position == 0:
-                reward = -0.0001
+                # 규칙3: 무포지션 관망 페널티 2배 상향 (-0.0001 → -0.0002)
+                reward = -0.0002
             else:
                 raw_ret = self._calc_raw_ret(current_price)
                 lev_ret = raw_ret * self.leverage
-                # 미실현 손실 per-step 패널티
-                unreal_penalty = 0.0
-                if lev_ret < -UNREALIZED_LOSS_THRESHOLD:
-                    unreal_penalty = abs(lev_ret) * UNREALIZED_LOSS_COEF * self.position_size
-                # 보유 시간 패널티 (레버리지·포지션 비례, 지수 증가)
-                base_penalty = -0.0005 * max(1.0, self.leverage * self.position_size)
-                if hold_steps >= HOLD_BASE_STEPS:
-                    extra  = (hold_steps - HOLD_BASE_STEPS) / HOLD_BASE_STEPS
-                    reward = base_penalty * (1.0 + extra ** 1.5) - unreal_penalty
+                if lev_ret > 0:
+                    # 규칙2: 수익 중 → 시간 페널티 면제 + 트레일링 보상
+                    reward = lev_ret * TRAILING_REWARD_COEF
                 else:
-                    reward = base_penalty - unreal_penalty
+                    # 손실 중 또는 손익분기: 기존 패널티 유지
+                    unreal_penalty = 0.0
+                    if lev_ret < -UNREALIZED_LOSS_THRESHOLD:
+                        unreal_penalty = abs(lev_ret) * UNREALIZED_LOSS_COEF * self.position_size
+                    base_penalty = -0.0005 * max(1.0, self.leverage * self.position_size)
+                    if hold_steps >= HOLD_BASE_STEPS:
+                        extra  = (hold_steps - HOLD_BASE_STEPS) / HOLD_BASE_STEPS
+                        reward = base_penalty * (1.0 + extra ** 1.5) - unreal_penalty
+                    else:
+                        reward = base_penalty - unreal_penalty
 
         # ── ④ 펀딩비 차감 ──────────────────────────────────────
         self._apply_funding()
