@@ -2,9 +2,10 @@
 Commander 일괄 백테스트 실행기
 
 사용법:
-    python run_backtest.py                          # 기본(전체 candidates, 태그의 leverage 사용)
-    python run_backtest.py --tags lev3_seed42_001   # 태그의 leverage 사용
-    python run_backtest.py --tags lev2_seed42_001,lev2_seed43_001 --leverage 2
+    python run_backtest.py                                      # 기본(전체 candidates)
+    python run_backtest.py --source runs                        # 전체 runs 기준
+    python run_backtest.py --tags lev3_seed42_001               # candidates 태그 지정
+    python run_backtest.py --source runs --tags lev3_seed42_001 # runs 태그 지정
 """
 import os
 import sys
@@ -42,7 +43,7 @@ def _resolve_leverage(tag, leverage_override):
     return inferred
 
 
-def run_backtest_all(tags, leverage_override, model_dir, log_dir, data_path, reports_dir):
+def run_backtest_all(tags, leverage_override, model_dir, log_dir, data_path, reports_dir, source):
     os.makedirs(log_dir, exist_ok=True)
 
     results = []
@@ -58,6 +59,7 @@ def run_backtest_all(tags, leverage_override, model_dir, log_dir, data_path, rep
             "--model-tag", tag,
             "--suffix", tag,
             "--leverage", str(leverage),
+            "--model-source", source,
             "--model-dir", model_dir,
             "--data-path", data_path,
             "--reports-dir", reports_dir,
@@ -80,7 +82,19 @@ def run_backtest_all(tags, leverage_override, model_dir, log_dir, data_path, rep
     print("=" * 60)
 
 
-def _auto_discover_tags(model_dir):
+def _auto_discover_tags(model_dir, source):
+    if source == "runs":
+        runs_dir = os.path.join(model_dir, "runs")
+        if not os.path.isdir(runs_dir):
+            return []
+        tags = sorted(
+            name for name in os.listdir(runs_dir)
+            if os.path.isdir(os.path.join(runs_dir, name))
+            and os.path.exists(os.path.join(runs_dir, name, "best_model.zip"))
+            and not name.startswith(".")
+        )
+        return tags
+
     candidates_dir = os.path.join(model_dir, "candidates")
     if not os.path.isdir(candidates_dir):
         return []
@@ -94,7 +108,9 @@ def _auto_discover_tags(model_dir):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Commander 일괄 백테스트")
     parser.add_argument("--tags", type=str, default=None,
-                        help="쉼표 구분 태그 (미지정 시 candidates 전체)")
+                        help="쉼표 구분 태그 (source에 따라 candidates 또는 runs에서 조회)")
+    parser.add_argument("--source", type=str, choices=["candidates", "runs"], default="candidates",
+                        help="백테스트 대상 모델 원본 (기본: candidates)")
     parser.add_argument("--leverage", type=int, default=None,
                         help="레버리지 배수 override (미지정 시 태그에서 자동 추론)")
     parser.add_argument("--model-dir", type=str,
@@ -114,11 +130,11 @@ if __name__ == "__main__":
     if args.tags:
         tags = [t.strip() for t in args.tags.split(",") if t.strip()]
     else:
-        tags = _auto_discover_tags(args.model_dir)
+        tags = _auto_discover_tags(args.model_dir, args.source)
         if not tags:
-            print("[ERROR] candidates 폴더에 모델이 없습니다.")
+            print(f"[ERROR] {args.source} 에 백테스트 가능한 모델이 없습니다.")
             sys.exit(1)
-        print(f"[INFO] 자동 발견된 모델 {len(tags)}개: {tags}")
+        print(f"[INFO] 자동 발견된 {args.source} 모델 {len(tags)}개: {tags}")
 
     run_backtest_all(
         tags=tags,
@@ -127,4 +143,5 @@ if __name__ == "__main__":
         log_dir=args.log_dir,
         data_path=args.data_path,
         reports_dir=args.reports_dir,
+        source=args.source,
     )

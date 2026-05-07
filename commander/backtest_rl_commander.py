@@ -19,7 +19,7 @@ warnings.filterwarnings('ignore')
 
 
 # ── 유틸 ─────────────────────────────────────────────────────────
-def _resolve_model_path(model_path=None, model_tag=None, model_dir=None):
+def _resolve_model_path(model_path=None, model_tag=None, model_dir=None, model_source="candidates"):
     if model_dir is None:
         model_dir = os.path.join(ROOT_DIR, "models", "commander")
     if model_path is not None:
@@ -28,6 +28,11 @@ def _resolve_model_path(model_path=None, model_tag=None, model_dir=None):
         return model_path
     if model_tag:
         tag = model_tag[:-4] if model_tag.endswith(".zip") else model_tag
+        if model_source == "runs":
+            run_model_path = os.path.join(model_dir, "runs", tag, "best_model.zip")
+            if os.path.exists(run_model_path):
+                return run_model_path
+            return run_model_path
         candidates_path = os.path.join(model_dir, "candidates", f"{tag}.zip")
         if os.path.exists(candidates_path):
             return candidates_path
@@ -35,12 +40,12 @@ def _resolve_model_path(model_path=None, model_tag=None, model_dir=None):
     return os.path.join(model_dir, "best_model.zip")
 
 
-def _resolve_model_paths(model_paths=None, model_tags=None, model_dir=None):
+def _resolve_model_paths(model_paths=None, model_tags=None, model_dir=None, model_source="candidates"):
     if model_paths:
         return [p if os.path.isabs(p) else os.path.join(BASE_DIR, p) for p in model_paths]
     if model_tags:
-        return [_resolve_model_path(model_tag=t, model_dir=model_dir) for t in model_tags]
-    return [_resolve_model_path(model_dir=model_dir)]
+        return [_resolve_model_path(model_tag=t, model_dir=model_dir, model_source=model_source) for t in model_tags]
+    return [_resolve_model_path(model_dir=model_dir, model_source=model_source)]
 
 
 def _calc_mdd(balances):
@@ -129,6 +134,7 @@ def _write_trade_report(report_path, model_path, summary, trades):
 # ── 메인 백테스트 ─────────────────────────────────────────────────
 def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
                     ensemble_tags=None, leverage=2,
+                    model_source="candidates",
                     model_dir=None, data_path=None, reports_dir=None):
 
     print(f"\n{'='*55}")
@@ -137,12 +143,13 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
 
     if ensemble_tags:
         tags = [t.strip() for t in ensemble_tags.split(",") if t.strip()]
-        model_paths = _resolve_model_paths(model_tags=tags, model_dir=model_dir)
+        model_paths = _resolve_model_paths(model_tags=tags, model_dir=model_dir, model_source=model_source)
     else:
         model_paths = _resolve_model_paths(
             model_paths=[model_path] if model_path else None,
             model_tags=[model_tag] if model_tag else None,
             model_dir=model_dir,
+            model_source=model_source,
         )
 
     if data_path is None:
@@ -359,13 +366,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backtest Commander RL (Leverage)")
     parser.add_argument("--model-path", type=str, default=None)
     parser.add_argument("--model-tag", type=str, default=None,
-                        help="models/commander/candidates 내 태그, e.g. lev2_seed42_001")
+                        help="model-source 기준 태그, e.g. lev2_seed42_001")
     parser.add_argument("--ensemble-tags", type=str, default=None,
                         help="앙상블 태그 (쉼표 구분), e.g. lev2_seed42_001,lev2_seed43_001")
     parser.add_argument("--suffix", type=str, default="",
                         help="결과 파일명 접미사")
     parser.add_argument("--leverage", type=int, default=2,
                         help="레버리지 배수 (기본 2)")
+    parser.add_argument("--model-source", type=str, choices=["candidates", "runs"], default="candidates",
+                        help="model-tag 해석 대상 (기본: candidates)")
     parser.add_argument("--model-dir", type=str, default=None,
                         help="모델 루트 디렉토리 (기본: root/models/commander)")
     parser.add_argument("--data-path", type=str, default=None,
@@ -380,6 +389,7 @@ if __name__ == "__main__":
         output_suffix=args.suffix,
         ensemble_tags=args.ensemble_tags,
         leverage=args.leverage,
+        model_source=args.model_source,
         model_dir=args.model_dir,
         data_path=args.data_path,
         reports_dir=args.reports_dir,
