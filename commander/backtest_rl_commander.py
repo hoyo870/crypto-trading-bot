@@ -14,7 +14,7 @@ ROOT_DIR = os.path.dirname(BASE_DIR)
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from crypto_trading_env import LeverageTradingEnv
+from crypto_trading_env_baby import BabyLeverageTradingEnv
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -173,7 +173,7 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
             return
 
     # 레버리지 환경 생성 (전체 기간 백테스트)
-    env = LeverageTradingEnv(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
+    env = BabyLeverageTradingEnv(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
 
     print("[INFO] 모델 로드 중...")
     models = [PPO.load(path) for path in model_paths]

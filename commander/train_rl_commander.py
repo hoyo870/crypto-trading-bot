@@ -15,7 +15,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
-from crypto_trading_env import LeverageTradingEnv
+from crypto_trading_env_baby import BabyLeverageTradingEnv
 
 
 PPO_TUNING_PROFILES = {
@@ -135,7 +135,7 @@ def _resolve_split_ranges(max_steps, split_mode, train_ratio, eval_ratio):
     eval_end = max_steps
     return train_start, train_end, eval_start, eval_end
 
-class RegimeEvalEnv(LeverageTradingEnv):
+class RegimeEvalEnv(BabyLeverageTradingEnv):
     def __init__(self, data_path, eval_starts, eval_window=20_000, leverage=2, tuning_profile="balanced"):
         super().__init__(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
         self.eval_starts = list(eval_starts)
@@ -150,7 +150,7 @@ class RegimeEvalEnv(LeverageTradingEnv):
         self.eval_idx += 1
         return super().reset(seed=seed, options=options)
 
-class TrainSliceEnv(LeverageTradingEnv):
+class TrainSliceEnv(BabyLeverageTradingEnv):
     def __init__(self, data_path, leverage, train_start, train_end, train_ep_steps, tuning_profile="balanced"):
         super().__init__(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
         self.train_start = max(0, int(train_start))
@@ -164,7 +164,7 @@ class TrainSliceEnv(LeverageTradingEnv):
         options.setdefault("max_ep_steps", self.train_ep_steps)
         return super().reset(seed=seed, options=options)
 
-class EvalSliceEnv(LeverageTradingEnv):
+class EvalSliceEnv(BabyLeverageTradingEnv):
     def __init__(self, data_path, eval_starts, eval_window, leverage, tuning_profile="balanced"):
         super().__init__(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
         self.eval_starts = list(eval_starts)
@@ -226,7 +226,7 @@ def train_commander(total_timesteps=5_000_000,
         raise ValueError(f"Unknown tuning_profile: {tuning_profile}")
     ppo_profile = PPO_TUNING_PROFILES[tuning_profile]
 
-    full_env = LeverageTradingEnv(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
+    full_env = BabyLeverageTradingEnv(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
     max_steps = full_env.max_steps
     train_start, train_end, eval_start, eval_end = _resolve_split_ranges(
         max_steps=max_steps,
@@ -246,7 +246,7 @@ def train_commander(total_timesteps=5_000_000,
         )
 
     if split_mode == "none":
-        raw_env = LeverageTradingEnv(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
+        raw_env = BabyLeverageTradingEnv(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
         eval_starts = _build_regime_eval_starts(max_steps=raw_env.max_steps, eval_window=eval_window)
         raw_eval_env = RegimeEvalEnv(data_path=data_path, eval_starts=eval_starts,
                                      eval_window=eval_window, leverage=leverage,
