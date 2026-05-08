@@ -28,6 +28,9 @@ backup/v2/logs/
 backup/v2/reports/
 backup/v3/logs/
 backup/v3/reports/
+models/commander/candidates/*.zip
+models/commander/runs/*/*.zip
+models/commander/runs/*/*.npz
 
 # Keep source datasets and scalers tracked
 !data/*.csv
