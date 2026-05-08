@@ -102,13 +102,6 @@ def _select_top_k_candidates(model_dir, tags, top_k):
         if tag not in keep and os.path.exists(p):
             os.remove(p)
 
-    if scored and scored[0][0] in keep:
-        best_tag = scored[0][0]
-        best_src = os.path.join(candidates_dir, f"{best_tag}.zip")
-        if os.path.exists(best_src):
-            import shutil
-            shutil.copy2(best_src, os.path.join(model_dir, "best_model.zip"))
-
     print("\n[INFO] top-k 후보 선별 결과")
     for i, (tag, score) in enumerate(scored, start=1):
         mark = "KEEP" if tag in keep else "DROP"
@@ -120,7 +113,8 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
                     base_seed, seed_step, seeds_csv,
                     model_dir, log_dir, data_path, top_k,
                     split_mode, train_ratio, eval_ratio, train_ep_steps, eval_window,
-                    eval_freq, no_improve_start_ratio):
+                    eval_freq, no_improve_start_ratio,
+                    tuning_profile):
     os.makedirs(log_dir, exist_ok=True)
     candidates_dir = os.path.join(model_dir, "candidates")
     _preflight_check(data_path=data_path, model_dir=model_dir)
@@ -158,6 +152,7 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
             "--eval-window", str(eval_window),
             "--eval-freq", str(eval_freq),
             "--no-improve-start-ratio", str(no_improve_start_ratio),
+            "--tuning-profile", tuning_profile,
             "--model-dir", model_dir,
             "--data-path", data_path,
         ]
@@ -209,9 +204,9 @@ if __name__ == "__main__":
     parser.add_argument("--data-path", type=str,
                         default=os.path.join(ROOT_DIR, "data", "commander", "base_signals_log.csv"),
                         help="학습/평가에 사용할 입력 데이터 CSV")
-    parser.add_argument("--top-k", type=int, default=3,
-                        help="학습 완료 후 candidates 유지 개수 (0이면 비활성)")
-    parser.add_argument("--split-mode", type=str, choices=["none", "holdout"], default="none",
+    parser.add_argument("--top-k", type=int, default=0,
+                        help="학습 완료 후 candidates 유지 개수 (기본 0: 비활성, 베스트는 run_backtest에서 선별)")
+    parser.add_argument("--split-mode", type=str, choices=["none", "holdout"], default="holdout",
                         help="학습/평가 데이터 분할 모드")
     parser.add_argument("--train-ratio", type=float, default=0.7,
                         help="holdout 모드 학습 비율 (0~1)")
@@ -225,6 +220,10 @@ if __name__ == "__main__":
                         help="EvalCallback 평가 주기 (timesteps 단위)")
     parser.add_argument("--no-improve-start-ratio", type=float, default=0.1,
                         help="patience no-improve 체크 시작 비율 (최소 0.1, 최대 1.0)")
+    parser.add_argument("--tuning-profile", type=str,
+                        choices=["stable", "balanced", "aggressive"],
+                        default="balanced",
+                        help="v6 튜닝 프로파일")
     args = parser.parse_args()
 
     run_train_batch(
@@ -247,4 +246,5 @@ if __name__ == "__main__":
         eval_window=args.eval_window,
         eval_freq=args.eval_freq,
         no_improve_start_ratio=args.no_improve_start_ratio,
+        tuning_profile=args.tuning_profile,
     )

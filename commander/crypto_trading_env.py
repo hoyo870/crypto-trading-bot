@@ -28,26 +28,51 @@ DEFAULT_LEVERAGE      = 2
 FUNDING_RATE_PER_STEP = 0.0001 / (8 * 12)   # 0.01% / 8h, 5분봉 기준
 # ─────────────────────────────────────────────────────────────────
 
+TUNING_PROFILES = {
+    "stable": {
+        "hold_profit_peak_bonus": 0.0000,
+        "hold_loss_base_penalty": -0.00025,
+        "loss_time_exp_rate": 2.0,
+        "drawdown_threshold": 0.04,
+        "drawdown_penalty_coef": 0.12,
+    },
+    "balanced": {
+        "hold_profit_peak_bonus": 0.0002,
+        "hold_loss_base_penalty": -0.00030,
+        "loss_time_exp_rate": 2.8,
+        "drawdown_threshold": 0.05,
+        "drawdown_penalty_coef": 0.10,
+    },
+    "aggressive": {
+        "hold_profit_peak_bonus": 0.0005,
+        "hold_loss_base_penalty": -0.00035,
+        "loss_time_exp_rate": 3.4,
+        "drawdown_threshold": 0.07,
+        "drawdown_penalty_coef": 0.08,
+    },
+}
+
 class LeverageTradingEnv(gym.Env):
     """
-    레버리지 선물 거래 환경 (v5 보상 리팩토링 + 실시간 피 말리기 튜닝)
+    레버리지 선물 거래 환경 (v6 튜닝 프로파일 지원)
 
     보상 설계 핵심:
     1) 강제 청산은 즉시 종료하며 큰 음수 보상을 부여
     2) 홀드 보상은 손익 상태와 보유 시간에 따라 차등 부여
-    3) 손실 홀딩 시 '손실 깊이'에 비례하여 패널티 기하급수적 증가 (기도 매매 완벽 차단)
-    4) 계좌 시드(Drawdown) 5% 초과 하락 시 매 스텝 강한 패널티 부여 (시드 보호 본능)
+    3) 손실 홀딩 시 손실 깊이/보유시간을 반영한 패널티 적용
+    4) 계좌 드로우다운 임계치 초과 시 추가 패널티 적용
     5) 롱/숏 편향이 심해지면 진입 시 추가 패널티 적용
+    6) 튜닝 프로파일: stable / balanced / aggressive
     """
     metadata = {'render.modes': ['human']}
 
     def __init__(self, data_path, initial_balance=10000.0,
                  fee_rate=0.0005, leverage=DEFAULT_LEVERAGE,
-                 mode=None):
+                 mode=None, tuning_profile="balanced"):
         super().__init__()
         self.initial_balance = initial_balance
-        self.fee_rate        = fee_rate
-        self.leverage        = float(leverage)
+        self.fee_rate = fee_rate
+        self.leverage = float(leverage)
 
         # 청산 임계치: raw_ret <= -1/leverage (마진 100% 소진)
         self.liq_threshold = -1.0 / self.leverage
@@ -55,26 +80,37 @@ class LeverageTradingEnv(gym.Env):
         # 최대 보유 스텝: 24시간 고정 (레버리지 무관)
         self.max_hold_steps = MAX_HOLD_STEPS_BASE
 
-        print(f"[INFO] LeverageTradingEnv v5.1 (Tuned) lev={int(self.leverage)}x  "
+        if tuning_profile not in TUNING_PROFILES:
+            raise ValueError(f"Unknown tuning_profile: {tuning_profile}")
+        self.tuning_profile = tuning_profile
+        p = TUNING_PROFILES[tuning_profile]
+        self.hold_profit_peak_bonus = float(p["hold_profit_peak_bonus"])
+        self.hold_loss_base_penalty = float(p["hold_loss_base_penalty"])
+        self.loss_time_exp_rate = float(p["loss_time_exp_rate"])
+        self.drawdown_threshold = float(p["drawdown_threshold"])
+        self.drawdown_penalty_coef = float(p["drawdown_penalty_coef"])
+
+        print(f"[INFO] LeverageTradingEnv v6 lev={int(self.leverage)}x  "
               f"liq_at={1/self.leverage*100:.0f}%raw  "
               f"max_hold={self.max_hold_steps}bars  "
-              f"SafeLoss={SAFE_LOSS_THRESHOLD*100:.0f}%")
+              f"SafeLoss={SAFE_LOSS_THRESHOLD*100:.0f}%  "
+              f"profile={self.tuning_profile}")
 
         df = pd.read_csv(data_path)
         self.max_steps = len(df) - 1
 
-        self.closes         = df['close'].values.astype(np.float32)
-        self.long_scores    = df['long_score'].values.astype(np.float32)
-        self.short_scores   = df['short_score'].values.astype(np.float32)
+        self.closes = df['close'].values.astype(np.float32)
+        self.long_scores = df['long_score'].values.astype(np.float32)
+        self.short_scores = df['short_score'].values.astype(np.float32)
         self.context_scores = df['context_score'].values.astype(np.float32)
 
-        dt    = pd.to_datetime(df['datetime'])
+        dt = pd.to_datetime(df['datetime'])
         hours = dt.dt.hour.values
-        dows  = dt.dt.dayofweek.values
+        dows = dt.dt.dayofweek.values
         self.hour_sin = np.sin(2 * np.pi * hours / 24).astype(np.float32)
         self.hour_cos = np.cos(2 * np.pi * hours / 24).astype(np.float32)
-        self.dow_sin  = np.sin(2 * np.pi * dows  /  7).astype(np.float32)
-        self.dow_cos  = np.cos(2 * np.pi * dows  /  7).astype(np.float32)
+        self.dow_sin = np.sin(2 * np.pi * dows / 7).astype(np.float32)
+        self.dow_cos = np.cos(2 * np.pi * dows / 7).astype(np.float32)
 
         self.action_space = spaces.Discrete(6)
         self.observation_space = spaces.Box(
@@ -297,23 +333,22 @@ class LeverageTradingEnv(gym.Env):
                 lev_ret = raw_ret * self.leverage
                 if lev_ret > 0:
                     if raw_ret >= self.peak_unrealized_profit:
-                        reward += 0.0005 
+                        reward += self.hold_profit_peak_bonus
                     else:
                         reward += -(self.peak_unrealized_profit - raw_ret) * 100.0 * 0.1
                 else:
-                    # 🚨 튜닝 적용: 시간 가중치 + 손실 깊이에 비례한 고통 증폭
-                    time_weight = math.exp(3.0 * (hold_steps / 288.0))
+                    # 튜닝 프로파일 기반: 시간 가중치 + 손실 깊이 반영
+                    time_weight = math.exp(self.loss_time_exp_rate * (hold_steps / 288.0))
                     loss_magnitude = abs(lev_ret) * 100.0
-                    reward += -0.0003 * time_weight * (1.0 + loss_magnitude)
+                    reward += self.hold_loss_base_penalty * time_weight * (1.0 + loss_magnitude)
 
         # ── ④ 펀딩비 차감 ──────────────────────────────────────
         self._apply_funding()
 
-        # 🚨 튜닝 적용: 시드(Drawdown) 방어 패널티
-        # 고점 대비 계좌 잔고가 5% 이상 녹아내린 상태라면 숨만 쉬어도 벌점 누적
+        # 튜닝 프로파일 기반: 드로우다운 방어 패널티
         current_drawdown = (self.peak_balance - self.balance) / (self.peak_balance + 1e-8)
-        if current_drawdown > 0.05:
-            reward -= current_drawdown * 0.1
+        if current_drawdown > self.drawdown_threshold:
+            reward -= current_drawdown * self.drawdown_penalty_coef
 
         # 최종 보상 클리핑
         reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))

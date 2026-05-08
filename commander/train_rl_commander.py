@@ -18,6 +18,34 @@ if BASE_DIR not in sys.path:
 from crypto_trading_env import LeverageTradingEnv
 
 
+PPO_TUNING_PROFILES = {
+    "stable": {
+        "policy_kwargs": dict(net_arch=[256, 256, 128]),
+        "learning_rate": 1e-4,
+        "ent_coef": 0.004,
+        "vf_coef": 0.5,
+        "n_steps": 4096,
+        "batch_size": 128,
+    },
+    "balanced": {
+        "policy_kwargs": dict(net_arch=[256, 256, 128]),
+        "learning_rate": 2e-4,
+        "ent_coef": 0.007,
+        "vf_coef": 0.5,
+        "n_steps": 3072,
+        "batch_size": 256,
+    },
+    "aggressive": {
+        "policy_kwargs": dict(net_arch=[256, 128]),
+        "learning_rate": 3e-4,
+        "ent_coef": 0.010,
+        "vf_coef": 0.5,
+        "n_steps": 2048,
+        "batch_size": 64,
+    },
+}
+
+
 class SmartStopCallback(BaseCallback):
     """
     3가지 조건으로 자동 학습 종료:
@@ -108,8 +136,8 @@ def _resolve_split_ranges(max_steps, split_mode, train_ratio, eval_ratio):
     return train_start, train_end, eval_start, eval_end
 
 class RegimeEvalEnv(LeverageTradingEnv):
-    def __init__(self, data_path, eval_starts, eval_window=20_000, leverage=2):
-        super().__init__(data_path=data_path, leverage=leverage)
+    def __init__(self, data_path, eval_starts, eval_window=20_000, leverage=2, tuning_profile="balanced"):
+        super().__init__(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
         self.eval_starts = list(eval_starts)
         self.eval_window = eval_window
         self.eval_idx = 0
@@ -123,8 +151,8 @@ class RegimeEvalEnv(LeverageTradingEnv):
         return super().reset(seed=seed, options=options)
 
 class TrainSliceEnv(LeverageTradingEnv):
-    def __init__(self, data_path, leverage, train_start, train_end, train_ep_steps):
-        super().__init__(data_path=data_path, leverage=leverage)
+    def __init__(self, data_path, leverage, train_start, train_end, train_ep_steps, tuning_profile="balanced"):
+        super().__init__(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
         self.train_start = max(0, int(train_start))
         self.train_end = max(self.train_start, int(train_end))
         self.train_ep_steps = int(train_ep_steps)
@@ -137,8 +165,8 @@ class TrainSliceEnv(LeverageTradingEnv):
         return super().reset(seed=seed, options=options)
 
 class EvalSliceEnv(LeverageTradingEnv):
-    def __init__(self, data_path, eval_starts, eval_window, leverage):
-        super().__init__(data_path=data_path, leverage=leverage)
+    def __init__(self, data_path, eval_starts, eval_window, leverage, tuning_profile="balanced"):
+        super().__init__(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
         self.eval_starts = list(eval_starts)
         self.eval_window = int(eval_window)
         self.eval_idx = 0
@@ -180,6 +208,7 @@ def train_commander(total_timesteps=5_000_000,
                     eval_ratio=0.2,
                     train_ep_steps=20_000,
                     eval_window=20_000,
+                    tuning_profile="balanced",
                     model_dir=None,
                     data_path=None):
 
@@ -193,7 +222,11 @@ def train_commander(total_timesteps=5_000_000,
         print("[ERROR] base_signals_log.csv 없음. data 폴더 확인 필요.")
         return
 
-    full_env = LeverageTradingEnv(data_path=data_path, leverage=leverage)
+    if tuning_profile not in PPO_TUNING_PROFILES:
+        raise ValueError(f"Unknown tuning_profile: {tuning_profile}")
+    ppo_profile = PPO_TUNING_PROFILES[tuning_profile]
+
+    full_env = LeverageTradingEnv(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
     max_steps = full_env.max_steps
     train_start, train_end, eval_start, eval_end = _resolve_split_ranges(
         max_steps=max_steps,
@@ -213,10 +246,11 @@ def train_commander(total_timesteps=5_000_000,
         )
 
     if split_mode == "none":
-        raw_env = LeverageTradingEnv(data_path=data_path, leverage=leverage)
+        raw_env = LeverageTradingEnv(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
         eval_starts = _build_regime_eval_starts(max_steps=raw_env.max_steps, eval_window=eval_window)
         raw_eval_env = RegimeEvalEnv(data_path=data_path, eval_starts=eval_starts,
-                                     eval_window=eval_window, leverage=leverage)
+                                     eval_window=eval_window, leverage=leverage,
+                                     tuning_profile=tuning_profile)
         # 학습/평가 환경 모두 Monitor로 감싸서 안정적으로 로그를 수집합니다.
         env = Monitor(raw_env)
         eval_env = Monitor(raw_eval_env)
@@ -229,6 +263,7 @@ def train_commander(total_timesteps=5_000_000,
             train_start=train_start,
             train_end=train_end,
             train_ep_steps=train_ep_steps,
+            tuning_profile=tuning_profile,
         )
         eval_starts = _build_range_eval_starts(
             start_step=eval_start,
@@ -241,6 +276,7 @@ def train_commander(total_timesteps=5_000_000,
             eval_starts=eval_starts,
             eval_window=eval_window,
             leverage=leverage,
+            tuning_profile=tuning_profile,
         )
         # 학습/평가 환경 모두 Monitor로 감싸서 안정적으로 로그를 수집합니다.
         env = Monitor(raw_env)
@@ -275,31 +311,43 @@ def train_commander(total_timesteps=5_000_000,
         print(f"[INFO] 🔄 파인튜닝 모드: {load_model_path} 로드")
         model = PPO.load(load_model_path, env=env, device="auto",
                          custom_objects={
-                             "learning_rate": 1e-4,
-                             "ent_coef": 0.005,
-                             "n_steps": 4096,
-                             "batch_size": 128,
+                             "learning_rate": ppo_profile["learning_rate"],
+                             "ent_coef": ppo_profile["ent_coef"],
+                             "n_steps": ppo_profile["n_steps"],
+                             "batch_size": ppo_profile["batch_size"],
                          })
-        print(f"[INFO] 파인튜닝 hp: lr=1e-4, ent_coef=0.005, n_steps=4096, batch=128")
+        print(
+            f"[INFO] 파인튜닝 hp(profile={tuning_profile}): "
+            f"lr={ppo_profile['learning_rate']}, ent_coef={ppo_profile['ent_coef']}, "
+            f"n_steps={ppo_profile['n_steps']}, batch={ppo_profile['batch_size']}"
+        )
     elif improved_hp:
-        policy_kwargs = dict(net_arch=[256, 256, 128])
-        print(f"[INFO] 🆕 개선 hp 모드: net_arch=[256,256,128], lr=1e-4")
-        model = PPO("MlpPolicy", env, verbose=1, policy_kwargs=policy_kwargs,
-                    learning_rate=1e-4,
-                    ent_coef=0.005,
-                    vf_coef=0.5,
-                    n_steps=4096,
-                    batch_size=128,
+        print(
+            f"[INFO] 🆕 개선 hp 모드(profile={tuning_profile}): "
+            f"net_arch={ppo_profile['policy_kwargs']['net_arch']}, "
+            f"lr={ppo_profile['learning_rate']}"
+        )
+        model = PPO("MlpPolicy", env, verbose=1,
+                    policy_kwargs=ppo_profile["policy_kwargs"],
+                    learning_rate=ppo_profile["learning_rate"],
+                    ent_coef=ppo_profile["ent_coef"],
+                    vf_coef=ppo_profile["vf_coef"],
+                    n_steps=ppo_profile["n_steps"],
+                    batch_size=ppo_profile["batch_size"],
                     seed=seed)
     else:
-        policy_kwargs = dict(net_arch=[256, 128])
-        print(f"[INFO] 기본 hp 모드: net_arch=[256,128], lr=3e-4")
-        model = PPO("MlpPolicy", env, verbose=1, policy_kwargs=policy_kwargs,
-                    learning_rate=3e-4,
-                    ent_coef=0.01,
-                    vf_coef=0.5,
-                    n_steps=2048,
-                    batch_size=64,
+        print(
+            f"[INFO] 기본 hp 모드(profile={tuning_profile}): "
+            f"net_arch={ppo_profile['policy_kwargs']['net_arch']}, "
+            f"lr={ppo_profile['learning_rate']}"
+        )
+        model = PPO("MlpPolicy", env, verbose=1,
+                    policy_kwargs=ppo_profile["policy_kwargs"],
+                    learning_rate=ppo_profile["learning_rate"],
+                    ent_coef=ppo_profile["ent_coef"],
+                    vf_coef=ppo_profile["vf_coef"],
+                    n_steps=ppo_profile["n_steps"],
+                    batch_size=ppo_profile["batch_size"],
                     seed=seed)
 
     eval_callback = EvalCallback(eval_env, best_model_save_path=run_dir,
@@ -317,7 +365,7 @@ def train_commander(total_timesteps=5_000_000,
         no_improve_start_ratio=no_improve_start_ratio,
     )
 
-    print(f"[INFO] 모델 태그: {final_tag} | 레버리지: {int(leverage)}x")
+    print(f"[INFO] 모델 태그: {final_tag} | 레버리지: {int(leverage)}x | profile={tuning_profile}")
     print("[INFO] 학습 시작...")
     model.learn(total_timesteps=total_timesteps, callback=[eval_callback, smart_stop])
 
@@ -325,9 +373,7 @@ def train_commander(total_timesteps=5_000_000,
     if os.path.exists(best_model_in_run):
         promoted_path = os.path.join(candidates_dir, f"{final_tag}.zip")
         shutil.copy2(best_model_in_run, promoted_path)
-        shutil.copy2(best_model_in_run, os.path.join(model_dir, "best_model.zip"))
         print(f"[INFO] 후보 모델 저장: {promoted_path}")
-        print(f"[INFO] 기본 모델 갱신: {os.path.join(model_dir, 'best_model.zip')}")
     else:
         print("[WARN] best_model.zip 미생성 — eval 미도달 가능성 있음")
 
@@ -352,7 +398,7 @@ if __name__ == "__main__":
                         help="파인튜닝할 기존 commander 모델 ZIP 경로")
     parser.add_argument("--improved-hp", action="store_true",
                         help="개선 하이퍼파라미터 (net_arch 확장·lr 감소)")
-    parser.add_argument("--split-mode", type=str, choices=["none", "holdout"], default="none",
+    parser.add_argument("--split-mode", type=str, choices=["none", "holdout"], default="holdout",
                         help="학습/평가 데이터 분할 모드")
     parser.add_argument("--train-ratio", type=float, default=0.7,
                         help="holdout 모드 학습 비율 (0~1)")
@@ -362,6 +408,10 @@ if __name__ == "__main__":
                         help="학습 에피소드 길이")
     parser.add_argument("--eval-window", type=int, default=20_000,
                         help="평가 에피소드 길이")
+    parser.add_argument("--tuning-profile", type=str,
+                        choices=["stable", "balanced", "aggressive"],
+                        default="balanced",
+                        help="v6 튜닝 프로파일")
     parser.add_argument("--model-dir", type=str, default=None,
                         help="모델 저장 루트 디렉토리 (기본: root/models/commander)")
     parser.add_argument("--data-path", type=str, default=None,
@@ -389,6 +439,7 @@ if __name__ == "__main__":
         eval_ratio=args.eval_ratio,
         train_ep_steps=args.train_ep_steps,
         eval_window=args.eval_window,
+        tuning_profile=args.tuning_profile,
         model_dir=args.model_dir,
         data_path=args.data_path,
     )

@@ -2,6 +2,7 @@
 import os
 import sys
 import argparse
+import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -37,7 +38,16 @@ def _resolve_model_path(model_path=None, model_tag=None, model_dir=None, model_s
         if os.path.exists(candidates_path):
             return candidates_path
         return candidates_path
-    return os.path.join(model_dir, "best_model.zip")
+    candidates_dir = os.path.join(model_dir, "candidates")
+    if os.path.isdir(candidates_dir):
+        zips = sorted(
+            os.path.join(candidates_dir, f)
+            for f in os.listdir(candidates_dir)
+            if f.endswith(".zip") and not f.startswith(".")
+        )
+        if zips:
+            return zips[-1]
+    return os.path.join(candidates_dir, "<missing>.zip")
 
 
 def _resolve_model_paths(model_paths=None, model_tags=None, model_dir=None, model_source="candidates"):
@@ -135,7 +145,8 @@ def _write_trade_report(report_path, model_path, summary, trades):
 def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
                     ensemble_tags=None, leverage=2,
                     model_source="candidates",
-                    model_dir=None, data_path=None, reports_dir=None):
+                    model_dir=None, data_path=None, reports_dir=None,
+                    tuning_profile="balanced"):
 
     print(f"\n{'='*55}")
     print(f"📈 Commander RL 백테스트 시작 (레버리지 {leverage}x)")
@@ -162,7 +173,7 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
             return
 
     # 레버리지 환경 생성 (전체 기간 백테스트)
-    env = LeverageTradingEnv(data_path=data_path, leverage=leverage)
+    env = LeverageTradingEnv(data_path=data_path, leverage=leverage, tuning_profile=tuning_profile)
 
     print("[INFO] 모델 로드 중...")
     models = [PPO.load(path) for path in model_paths]
@@ -365,6 +376,7 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
     suffix = output_suffix or "latest"
     save_fig_path = os.path.join(reports_dir, f"rl_backtest_result_{suffix}.png")
     report_path   = os.path.join(reports_dir, f"rl_backtest_report_{suffix}.txt")
+    summary_path  = os.path.join(reports_dir, f"rl_backtest_summary_{suffix}.json")
 
     plt.tight_layout()
     plt.savefig(save_fig_path, dpi=300)
@@ -373,6 +385,16 @@ def run_rl_backtest(model_path=None, model_tag=None, output_suffix="",
     model_desc = ", ".join(model_paths) if len(model_paths) > 1 else model_paths[0]
     _write_trade_report(report_path, model_desc, summary, trades)
     print(f"[INFO] 📝 리포트 저장: {report_path}")
+
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "model_tag": model_tag,
+            "model_source": model_source,
+            "model_paths": model_paths,
+            "tuning_profile": tuning_profile,
+            **summary,
+        }, f, ensure_ascii=False, indent=2)
+    print(f"[INFO] 📦 요약 저장: {summary_path}")
 
 
 if __name__ == "__main__":
@@ -394,6 +416,10 @@ if __name__ == "__main__":
                         help="백테스트 데이터 CSV 경로 (기본: root/data/commander/base_signals_log.csv)")
     parser.add_argument("--reports-dir", type=str, default=None,
                         help="리포트/차트 출력 디렉토리 (기본: commander/reports)")
+    parser.add_argument("--tuning-profile", type=str,
+                        choices=["stable", "balanced", "aggressive"],
+                        default="balanced",
+                        help="백테스트 환경 튜닝 프로파일")
     args = parser.parse_args()
 
     run_rl_backtest(
@@ -406,4 +432,5 @@ if __name__ == "__main__":
         model_dir=args.model_dir,
         data_path=args.data_path,
         reports_dir=args.reports_dir,
+        tuning_profile=args.tuning_profile,
     )
