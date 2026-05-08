@@ -30,13 +30,14 @@ FUNDING_RATE_PER_STEP = 0.0001 / (8 * 12)   # 0.01% / 8h, 5분봉 기준
 
 class LeverageTradingEnv(gym.Env):
     """
-    레버리지 선물 거래 환경 (v4 → v5 보상 리팩토링)
+    레버리지 선물 거래 환경 (v5 보상 리팩토링 + 실시간 피 말리기 튜닝)
 
     보상 설계 핵심:
     1) 강제 청산은 즉시 종료하며 큰 음수 보상을 부여
     2) 홀드 보상은 손익 상태와 보유 시간에 따라 차등 부여
-    3) 손실 청산은 안전구간/초과구간으로 나눠 패널티 강도를 조절
-    4) 롱/숏 편향이 심해지면 진입 시 추가 패널티 적용
+    3) 손실 홀딩 시 '손실 깊이'에 비례하여 패널티 기하급수적 증가 (기도 매매 완벽 차단)
+    4) 계좌 시드(Drawdown) 5% 초과 하락 시 매 스텝 강한 패널티 부여 (시드 보호 본능)
+    5) 롱/숏 편향이 심해지면 진입 시 추가 패널티 적용
     """
     metadata = {'render.modes': ['human']}
 
@@ -54,7 +55,7 @@ class LeverageTradingEnv(gym.Env):
         # 최대 보유 스텝: 24시간 고정 (레버리지 무관)
         self.max_hold_steps = MAX_HOLD_STEPS_BASE
 
-        print(f"[INFO] LeverageTradingEnv v5  lev={int(self.leverage)}x  "
+        print(f"[INFO] LeverageTradingEnv v5.1 (Tuned) lev={int(self.leverage)}x  "
               f"liq_at={1/self.leverage*100:.0f}%raw  "
               f"max_hold={self.max_hold_steps}bars  "
               f"SafeLoss={SAFE_LOSS_THRESHOLD*100:.0f}%")
@@ -207,8 +208,7 @@ class LeverageTradingEnv(gym.Env):
                 self.liquidated                 = True
                 terminated                      = True
 
-                # 학습 안정성을 위해 즉시 클리핑 가능한 하한값으로 보상을 부여합니다.
-                reward                          = -REWARD_CLIP
+                reward                          = -LIQ_PENALTY
 
                 info = {
                     'final_balance': self.balance,
@@ -228,17 +228,17 @@ class LeverageTradingEnv(gym.Env):
             action = 0
             reward -= 0.02
 
-        # 유효하지 않은 액션을 hold로 치환하고 패널티를 부여합니다.
+        # 유효하지 않은 액션 치환 및 패널티
         is_invalid_action = False
         if action in (1, 2, 3, 4) and self.position != 0:
             is_invalid_action = True
-            action = 0  # 강제로 홀딩 상태 유지
+            action = 0
         elif action == 5 and self.position == 0:
             is_invalid_action = True
-            action = 0  # 관망 상태에서 청산 불가하므로 무시
+            action = 0
 
         if is_invalid_action:
-            reward -= 0.05  # 불가능한 행동을 시도한 에이전트에게 명확한 페널티 부여
+            reward -= 0.05
 
         # ── ③ 액션 처리 ─────────────────────────────────────────
         if action in (1, 2) and self.position == 0:         # Long 진입
@@ -280,7 +280,7 @@ class LeverageTradingEnv(gym.Env):
             net_ret = self._close_position(raw_ret)  
 
             if net_ret >= 0:
-                reward += net_ret * 100.0  # 앞 단계 패널티를 보존하기 위해 누적 방식 사용
+                reward += net_ret * 100.0
             else:
                 abs_loss = abs(net_ret)
                 if abs_loss <= SAFE_LOSS_THRESHOLD:
@@ -301,11 +301,19 @@ class LeverageTradingEnv(gym.Env):
                     else:
                         reward += -(self.peak_unrealized_profit - raw_ret) * 100.0 * 0.1
                 else:
+                    # 🚨 튜닝 적용: 시간 가중치 + 손실 깊이에 비례한 고통 증폭
                     time_weight = math.exp(3.0 * (hold_steps / 288.0))
-                    reward += -0.0003 * time_weight
+                    loss_magnitude = abs(lev_ret) * 100.0
+                    reward += -0.0003 * time_weight * (1.0 + loss_magnitude)
 
         # ── ④ 펀딩비 차감 ──────────────────────────────────────
         self._apply_funding()
+
+        # 🚨 튜닝 적용: 시드(Drawdown) 방어 패널티
+        # 고점 대비 계좌 잔고가 5% 이상 녹아내린 상태라면 숨만 쉬어도 벌점 누적
+        current_drawdown = (self.peak_balance - self.balance) / (self.peak_balance + 1e-8)
+        if current_drawdown > 0.05:
+            reward -= current_drawdown * 0.1
 
         # 최종 보상 클리핑
         reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
