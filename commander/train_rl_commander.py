@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
+# 에피소드 통계/로그 일관성을 위해 Monitor 래퍼를 사용합니다.
+from stable_baselines3.common.monitor import Monitor
 
 import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,9 +21,9 @@ from crypto_trading_env import LeverageTradingEnv
 class SmartStopCallback(BaseCallback):
     """
     3가지 조건으로 자동 학습 종료:
-    1. Early Stopping : eval reward가 patience 횟수 연속 개선 없으면 종료
-    2. 정책 퇴화 감지 : entropy_loss > entropy_threshold 이면 종료
-    3. 목표 달성     : eval reward >= reward_target 이면 종료
+    1) Early Stopping: eval reward가 patience 횟수 연속 개선 없으면 종료
+    2) 정책 퇴화 감지: entropy_loss가 임계치보다 높으면 종료
+    3) 목표 달성: eval reward가 reward_target 이상이면 종료
     """
     def __init__(self, eval_callback, patience=20, eval_freq=10000,
                  entropy_threshold=-0.01, reward_target=50.0,
@@ -33,7 +35,6 @@ class SmartStopCallback(BaseCallback):
         self.eval_freq = eval_freq
         self.entropy_threshold = entropy_threshold
         self.reward_target = reward_target
-        # patience no-improve 카운트는 학습 초반(최소 10%)을 지난 후부터 시작
         ratio = min(1.0, max(0.1, float(no_improve_start_ratio)))
         self.no_improve_start_ratio = ratio
         self.no_improve_check_start_step = max(1, int(total_timesteps * ratio))
@@ -62,15 +63,11 @@ class SmartStopCallback(BaseCallback):
         else:
             if self.n_calls < self.no_improve_check_start_step:
                 if self.verbose:
-                    print(
-                        f"[SmartStop] ⏳ 워밍업 구간: no-improve 체크 보류 "
-                        f"({self.n_calls}/{self.no_improve_check_start_step} steps)"
-                    )
+                    print(f"[SmartStop] ⏳ 워밍업 구간: no-improve 체크 보류 ({self.n_calls}/{self.no_improve_check_start_step} steps)")
                 return True
             self._no_improve_count += 1
             if self.verbose:
-                print(f"[SmartStop] ⚠️  개선 없음 {self._no_improve_count}/{self.patience} "
-                      f"(best={self._best_reward:.2f})")
+                print(f"[SmartStop] ⚠️  개선 없음 {self._no_improve_count}/{self.patience} (best={self._best_reward:.2f})")
 
         if self._no_improve_count >= self.patience:
             if self.verbose:
@@ -84,13 +81,11 @@ class SmartStopCallback(BaseCallback):
 
         return True
 
-
 def _build_regime_eval_starts(max_steps, eval_window=20_000):
     anchors = [0.0, 0.25, 0.50, 0.75]
     max_start = max(0, max_steps - eval_window)
     starts = [min(max_start, int(max_steps * q)) for q in anchors]
     return sorted(set(starts)) or [0]
-
 
 def _build_range_eval_starts(start_step, end_step, eval_window=20_000, n_points=4):
     if end_step <= start_step:
@@ -103,18 +98,14 @@ def _build_range_eval_starts(start_step, end_step, eval_window=20_000, n_points=
     starts = [int(start_step + (max_start - start_step) * q) for q in anchors]
     return sorted(set(starts)) or [start_step]
 
-
 def _resolve_split_ranges(max_steps, split_mode, train_ratio, eval_ratio):
     if split_mode == "none":
         return 0, max_steps, max(0, max_steps - int(max_steps * eval_ratio)), max_steps
-
-    # holdout: 앞 구간 학습 / 뒤 구간 평가
     train_end = int(max_steps * train_ratio)
     eval_start = max(train_end + 1, max_steps - int(max_steps * eval_ratio))
     train_start = 0
     eval_end = max_steps
     return train_start, train_end, eval_start, eval_end
-
 
 class RegimeEvalEnv(LeverageTradingEnv):
     def __init__(self, data_path, eval_starts, eval_window=20_000, leverage=2):
@@ -122,7 +113,6 @@ class RegimeEvalEnv(LeverageTradingEnv):
         self.eval_starts = list(eval_starts)
         self.eval_window = eval_window
         self.eval_idx = 0
-
     def reset(self, seed=None, options=None):
         options = dict(options or {})
         if 'start_step' not in options:
@@ -132,14 +122,12 @@ class RegimeEvalEnv(LeverageTradingEnv):
         self.eval_idx += 1
         return super().reset(seed=seed, options=options)
 
-
 class TrainSliceEnv(LeverageTradingEnv):
     def __init__(self, data_path, leverage, train_start, train_end, train_ep_steps):
         super().__init__(data_path=data_path, leverage=leverage)
         self.train_start = max(0, int(train_start))
         self.train_end = max(self.train_start, int(train_end))
         self.train_ep_steps = int(train_ep_steps)
-
     def reset(self, seed=None, options=None):
         options = dict(options or {})
         max_start = max(self.train_start, self.train_end - self.train_ep_steps)
@@ -148,14 +136,12 @@ class TrainSliceEnv(LeverageTradingEnv):
         options.setdefault("max_ep_steps", self.train_ep_steps)
         return super().reset(seed=seed, options=options)
 
-
 class EvalSliceEnv(LeverageTradingEnv):
     def __init__(self, data_path, eval_starts, eval_window, leverage):
         super().__init__(data_path=data_path, leverage=leverage)
         self.eval_starts = list(eval_starts)
         self.eval_window = int(eval_window)
         self.eval_idx = 0
-
     def reset(self, seed=None, options=None):
         options = dict(options or {})
         options.setdefault('start_step', self.eval_starts[self.eval_idx % len(self.eval_starts)])
@@ -163,11 +149,9 @@ class EvalSliceEnv(LeverageTradingEnv):
         self.eval_idx += 1
         return super().reset(seed=seed, options=options)
 
-
 def _normalize_tag(tag):
     clean = re.sub(r"[^a-zA-Z0-9_-]", "", str(tag)).lower()
     return clean or None
-
 
 def _next_model_tag(candidates_dir, leverage, seed):
     prefix = f"lev{int(leverage)}_seed{int(seed)}"
@@ -179,7 +163,6 @@ def _next_model_tag(candidates_dir, leverage, seed):
             if m:
                 max_idx = max(max_idx, int(m.group(1)))
     return f"{prefix}_{max_idx + 1:03d}"
-
 
 def train_commander(total_timesteps=5_000_000,
                     eval_freq=10_000,
@@ -219,7 +202,6 @@ def train_commander(total_timesteps=5_000_000,
         eval_ratio=eval_ratio,
     )
 
-    # split이 비정상 구간을 만들면 전체 구간 fallback
     if (train_end - train_start) < max(1_000, train_ep_steps) or (eval_end - eval_start) < max(1_000, eval_window):
         print("[WARN] 데이터 분할 구간이 너무 작아 split_mode=none 으로 대체합니다.")
         split_mode = "none"
@@ -231,14 +213,17 @@ def train_commander(total_timesteps=5_000_000,
         )
 
     if split_mode == "none":
-        env = LeverageTradingEnv(data_path=data_path, leverage=leverage)
-        eval_starts = _build_regime_eval_starts(max_steps=env.max_steps, eval_window=eval_window)
-        eval_env = RegimeEvalEnv(data_path=data_path, eval_starts=eval_starts,
-                                 eval_window=eval_window, leverage=leverage)
+        raw_env = LeverageTradingEnv(data_path=data_path, leverage=leverage)
+        eval_starts = _build_regime_eval_starts(max_steps=raw_env.max_steps, eval_window=eval_window)
+        raw_eval_env = RegimeEvalEnv(data_path=data_path, eval_starts=eval_starts,
+                                     eval_window=eval_window, leverage=leverage)
+        # 학습/평가 환경 모두 Monitor로 감싸서 안정적으로 로그를 수집합니다.
+        env = Monitor(raw_env)
+        eval_env = Monitor(raw_eval_env)
         print(f"[INFO] 데이터 분할: none (전체 구간)")
         print(f"[INFO] 평가 시작점(국면 분할): {eval_starts}")
     else:
-        env = TrainSliceEnv(
+        raw_env = TrainSliceEnv(
             data_path=data_path,
             leverage=leverage,
             train_start=train_start,
@@ -251,12 +236,15 @@ def train_commander(total_timesteps=5_000_000,
             eval_window=eval_window,
             n_points=4,
         )
-        eval_env = EvalSliceEnv(
+        raw_eval_env = EvalSliceEnv(
             data_path=data_path,
             eval_starts=eval_starts,
             eval_window=eval_window,
             leverage=leverage,
         )
+        # 학습/평가 환경 모두 Monitor로 감싸서 안정적으로 로그를 수집합니다.
+        env = Monitor(raw_env)
+        eval_env = Monitor(raw_eval_env)
         dt_index = pd.to_datetime(pd.read_csv(data_path, usecols=["datetime"])["datetime"], errors="coerce")
         def _d(step):
             if 0 <= step < len(dt_index) and pd.notna(dt_index.iloc[step]):
@@ -285,8 +273,6 @@ def train_commander(total_timesteps=5_000_000,
             print(f"[ERROR] 로드할 모델 파일 없음: {load_model_path}")
             return
         print(f"[INFO] 🔄 파인튜닝 모드: {load_model_path} 로드")
-        # obs 13차원 / action 6차원 (v4 환경) 기준으로 학습된 모델에만 파인튜닝 적용 가능
-        # 구버전(obs 10/9차원, action 4차원) 모델과 호환 불가
         model = PPO.load(load_model_path, env=env, device="auto",
                          custom_objects={
                              "learning_rate": 1e-4,
@@ -296,7 +282,6 @@ def train_commander(total_timesteps=5_000_000,
                          })
         print(f"[INFO] 파인튜닝 hp: lr=1e-4, ent_coef=0.005, n_steps=4096, batch=128")
     elif improved_hp:
-        # obs 13차원 + action 6차원에 맞게 네트워크 확장
         policy_kwargs = dict(net_arch=[256, 256, 128])
         print(f"[INFO] 🆕 개선 hp 모드: net_arch=[256,256,128], lr=1e-4")
         model = PPO("MlpPolicy", env, verbose=1, policy_kwargs=policy_kwargs,
@@ -347,7 +332,6 @@ def train_commander(total_timesteps=5_000_000,
         print("[WARN] best_model.zip 미생성 — eval 미도달 가능성 있음")
 
     print(f"\n🎉 훈련 완료. 결과 폴더: {run_dir}")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Commander RL (Leverage)")

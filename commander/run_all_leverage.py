@@ -9,7 +9,7 @@ from collections import deque
 # 현재 스크립트가 있는 디렉토리
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# M1 Max 32GB 기준 기본 병렬 수 (안정성/속도 균형)
+# 기본 병렬 수 (안정성/속도 균형)
 DEFAULT_PARALLEL_JOBS = 3
 
 def _build_tasks():

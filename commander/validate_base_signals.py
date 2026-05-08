@@ -76,7 +76,8 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512):
     if 'Target' in df.columns: exclude_cols.append('Target')
     context_cols = [c for c in df.columns if c not in price_vol_cols + exclude_cols]
 
-    # Test 구간(마지막 15%)만 추출
+    # 전체 구간을 대상으로 시그널을 생성합니다.
+    # 마지막 15%만 사용하려면 아래 예시처럼 val_end를 조정합니다.
     # val_end = int(len(df) * 0.85)
     val_end = 0
     

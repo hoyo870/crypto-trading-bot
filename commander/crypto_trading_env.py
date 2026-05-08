@@ -12,7 +12,7 @@ MAX_HOLD_STEPS_BASE = 288      # 최대 보유: 24시간 고정 (288 × 5분봉)
 MIN_EP_STEPS        = 10_000   # 에피소드 최소 잔여 스텝
 MAX_EP_STEPS        = 20_000   # 에피소드 최대 길이 (~70일)
 REWARD_CLIP         = 10.0     # per-step 보상 클리핑 범위 (청산 벌점 제외)
-LIQ_PENALTY            = 10000.0  # 레버리지 강제 청산 벌점
+LIQ_PENALTY         = 10000.0  # 강제 청산 기준 벌점 크기(학습 보상에는 클리핑 적용)
 LONG_IMBALANCE_THRESHOLD  = 0.55  # 롱 비율 임계치 (초과 시 롱 진입 패널티)
 SHORT_IMBALANCE_THRESHOLD = 0.45  # 숏 비율 임계치 (초과 시 숏 진입 패널티)
 IMBALANCE_PENALTY_COEF    = 1.0   # 롱/숏 편향 패널티 계수
@@ -28,19 +28,15 @@ DEFAULT_LEVERAGE      = 2
 FUNDING_RATE_PER_STEP = 0.0001 / (8 * 12)   # 0.01% / 8h, 5분봉 기준
 # ─────────────────────────────────────────────────────────────────
 
-
 class LeverageTradingEnv(gym.Env):
     """
     레버리지 선물 거래 환경 (v4 → v5 보상 리팩토링)
 
-    보상 체계 변경 사항:
-    ① Hard SL 제거         : 강제 청산(Liquidation)만 종료, 벌점 -10000
-    ② 홀딩 비용            : 무포지션 -0.0001 / 손실 중 -0.0005 (고정)
-    ③ 수익 트레일링        : peak_unrealized_profit 기반, 전고점 갱신 중 0점,
-                              조정 중 (peak-현재)*100*0.1 약한 패널티
-    ④ 손절 유도            : 안전구간(|net_ret|≤2%) 선형, 지옥구간 초과분 제곱 추가 감점
-    ⑤ 롱55:숏45 밸런스    : 10회 이상 시 비율 초과 진입 패널티
-    ⑥ MAX_HOLD 고정 24시간  : MAX_HOLD_STEPS_BASE(288 bars) 고정, MIN_HOLD 12스텝 유지
+    보상 설계 핵심:
+    1) 강제 청산은 즉시 종료하며 큰 음수 보상을 부여
+    2) 홀드 보상은 손익 상태와 보유 시간에 따라 차등 부여
+    3) 손실 청산은 안전구간/초과구간으로 나눠 패널티 강도를 조절
+    4) 롱/숏 편향이 심해지면 진입 시 추가 패널티 적용
     """
     metadata = {'render.modes': ['human']}
 
@@ -79,16 +75,11 @@ class LeverageTradingEnv(gym.Env):
         self.dow_sin  = np.sin(2 * np.pi * dows  /  7).astype(np.float32)
         self.dow_cos  = np.cos(2 * np.pi * dows  /  7).astype(np.float32)
 
-        # 액션: 0=hold, 1=long_full, 2=long_half, 3=short_full, 4=short_half, 5=close
         self.action_space = spaces.Discrete(6)
-        # obs(13): long_score, short_score, context_score, position, unrealized_pnl,
-        #          hour_sin, hour_cos, dow_sin, dow_cos, leverage_norm,
-        #          hold_ratio, drawdown_norm, position_size_norm
         self.observation_space = spaces.Box(
             low=-1.0, high=1.0, shape=(13,), dtype=np.float32
         )
 
-    # ────────────────────── reset ──────────────────────────────
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         if options is not None and 'start_step' in options:
@@ -114,13 +105,12 @@ class LeverageTradingEnv(gym.Env):
         self.win_trades              = 0
         self.long_entries            = 0
         self.short_entries           = 0
-        self.peak_unrealized_profit  = 0.0   # 진입 후 달성한 최고 미실현 raw_ret
+        self.peak_unrealized_profit  = 0.0   
         self.liquidated              = False
         return self._get_obs(), {}
 
-    # ────────────────────── 내부 유틸 ──────────────────────────
     def _calc_raw_ret(self, current_price):
-        """현재 포지션의 raw(비레버리지) 수익률 계산"""
+        """현재 포지션 기준 비레버리지(raw) 수익률을 계산합니다."""
         if self.position == 0:
             return 0.0
         if self.position == 1:
@@ -128,10 +118,7 @@ class LeverageTradingEnv(gym.Env):
         return float((self.entry_price - current_price) / self.entry_price)
 
     def _close_position(self, raw_ret):
-        """
-        포지션 청산. margin_used 기반으로 P&L 계산.
-        net_ret(레버리지 적용 후 수수료 양방 차감) 반환.
-        """
+        """포지션을 청산하고 수수료 반영 후 net_ret(레버리지 반영)을 반환합니다."""
         lev_ret = raw_ret * self.leverage
         pnl     = self.margin_used * lev_ret
         fee_out = self.margin_used * self.fee_rate * self.leverage
@@ -149,17 +136,15 @@ class LeverageTradingEnv(gym.Env):
         return net_ret
 
     def _apply_funding(self):
-        """포지션 보유 중 매 스텝 펀딩비 차감"""
+        """포지션 보유 중 매 스텝 펀딩비를 잔고에서 차감합니다."""
         if self.position != 0 and self.margin_used > 0:
             funding = self.margin_used * FUNDING_RATE_PER_STEP * self.leverage
             self.balance = max(0.0, self.balance - funding)
 
-    # ────────────────────── obs ────────────────────────────────
     def _get_obs(self):
         i = min(self.current_step, self.max_steps - 1)
         current_price = self.closes[i]
 
-        # 미실현 손익 (레버리지 적용, -1~1 클리핑)
         unrealized_pnl = 0.0
         if self.position != 0:
             raw = (current_price - self.entry_price) / self.entry_price \
@@ -167,18 +152,16 @@ class LeverageTradingEnv(gym.Env):
                   (self.entry_price - current_price) / self.entry_price
             unrealized_pnl = float(np.clip(raw * self.leverage, -1.0, 1.0))
 
-        # 보유 비율 (0~1)
         hold_steps = (self.current_step - self.entry_step) if self.position != 0 else 0
         hold_ratio = float(np.clip(hold_steps / max(1, self.max_hold_steps), 0.0, 1.0))
 
-        # 계좌 드로우다운 (0~1)
         drawdown_norm = float(np.clip(
             (self.peak_balance - self.balance) / (self.peak_balance + 1e-8),
             0.0, 1.0
         ))
 
-        leverage_norm      = float((self.leverage - 1.0) / 4.0)  # 1x=0, 5x=1
-        position_size_norm = float(self.position_size)             # 0, 0.5, 1.0
+        leverage_norm      = float((self.leverage - 1.0) / 4.0)  
+        position_size_norm = float(self.position_size)             
 
         return np.array([
             self.long_scores[i],
@@ -196,7 +179,6 @@ class LeverageTradingEnv(gym.Env):
             position_size_norm,
         ], dtype=np.float32)
 
-    # ────────────────────── step ───────────────────────────────
     def step(self, action):
         i             = min(self.current_step, self.max_steps - 1)
         current_price = self.closes[i]
@@ -211,11 +193,10 @@ class LeverageTradingEnv(gym.Env):
         if self.position != 0:
             raw_ret_now = self._calc_raw_ret(current_price)
 
-            # 미실현 최고 수익 갱신
             if raw_ret_now > self.peak_unrealized_profit:
                 self.peak_unrealized_profit = raw_ret_now
 
-            # 마진 100% 소진 → 강제 청산 (벌점 -10000)
+            # 마진 100% 소진 → 강제 청산
             if raw_ret_now <= self.liq_threshold:
                 self.balance = max(0.0, self.balance - self.margin_used)
                 self.total_trades              += 1
@@ -225,7 +206,10 @@ class LeverageTradingEnv(gym.Env):
                 self.peak_unrealized_profit     = 0.0
                 self.liquidated                 = True
                 terminated                      = True
-                reward                          = -LIQ_PENALTY
+
+                # 학습 안정성을 위해 즉시 클리핑 가능한 하한값으로 보상을 부여합니다.
+                reward                          = -REWARD_CLIP
+
                 info = {
                     'final_balance': self.balance,
                     'total_trades':  self.total_trades,
@@ -244,8 +228,20 @@ class LeverageTradingEnv(gym.Env):
             action = 0
             reward -= 0.02
 
+        # 유효하지 않은 액션을 hold로 치환하고 패널티를 부여합니다.
+        is_invalid_action = False
+        if action in (1, 2, 3, 4) and self.position != 0:
+            is_invalid_action = True
+            action = 0  # 강제로 홀딩 상태 유지
+        elif action == 5 and self.position == 0:
+            is_invalid_action = True
+            action = 0  # 관망 상태에서 청산 불가하므로 무시
+
+        if is_invalid_action:
+            reward -= 0.05  # 불가능한 행동을 시도한 에이전트에게 명확한 페널티 부여
+
         # ── ③ 액션 처리 ─────────────────────────────────────────
-        if action in (1, 2) and self.position == 0:         # Long 진입 (full/half)
+        if action in (1, 2) and self.position == 0:         # Long 진입
             margin_ratio                = MARGIN_FULL if action == 1 else MARGIN_HALF
             self.margin_used            = self.balance * margin_ratio
             self.position               = 1
@@ -262,7 +258,7 @@ class LeverageTradingEnv(gym.Env):
                 if long_ratio > LONG_IMBALANCE_THRESHOLD:
                     reward -= (long_ratio - LONG_IMBALANCE_THRESHOLD) * IMBALANCE_PENALTY_COEF
 
-        elif action in (3, 4) and self.position == 0:       # Short 진입 (full/half)
+        elif action in (3, 4) and self.position == 0:       # Short 진입
             margin_ratio                = MARGIN_FULL if action == 3 else MARGIN_HALF
             self.margin_used            = self.balance * margin_ratio
             self.position               = -1
@@ -281,43 +277,37 @@ class LeverageTradingEnv(gym.Env):
 
         elif action == 5 and self.position != 0:             # 자발적 청산
             raw_ret = self._calc_raw_ret(current_price)
-            net_ret = self._close_position(raw_ret)  # peak_unrealized_profit도 0으로 리셋
+            net_ret = self._close_position(raw_ret)  
 
             if net_ret >= 0:
-                # 익절: 순수익률 × 100
-                reward = net_ret * 100.0
+                reward += net_ret * 100.0  # 앞 단계 패널티를 보존하기 위해 누적 방식 사용
             else:
-                # 손절: 안전구간(|net_ret|≤2%) 선형, 지옥구간 초과분 제곱 추가 감점
                 abs_loss = abs(net_ret)
                 if abs_loss <= SAFE_LOSS_THRESHOLD:
-                    reward = net_ret * 100.0
+                    reward += net_ret * 100.0
                 else:
                     excess = abs_loss - SAFE_LOSS_THRESHOLD
-                    reward = net_ret * 100.0 - (excess * 100.0) ** 2 * 0.5
+                    reward += net_ret * 100.0 - (excess * 100.0) ** 2 * 0.5
 
         elif action == 0:                                    # 홀드
             if self.position == 0:
-                # 무포지션 관망 비용
-                reward = -0.0001
+                reward += -0.0001
             else:
                 raw_ret = self._calc_raw_ret(current_price)
                 lev_ret = raw_ret * self.leverage
                 if lev_ret > 0:
-                    # 수익 중: 전고점 갱신 중이면 소소한 도파민(+), 조정 중이면 약한 패널티(-)
                     if raw_ret >= self.peak_unrealized_profit:
-                        # 🚨 변경 1: 0.0에서 소소한 플러스 점수 부여 (추세 탑승 격려)
-                        reward = 0.0005 
+                        reward += 0.0005 
                     else:
-                        reward = -(self.peak_unrealized_profit - raw_ret) * 100.0 * 0.1
+                        reward += -(self.peak_unrealized_profit - raw_ret) * 100.0 * 0.1
                 else:
-                    # 🚨 변경 2: 손실 패널티 강도 50% 상향 (-0.0002 -> -0.0003)
-                    # 손실 중: 24시간(288스텝) 누적 패널티가 -3.0점을 돌파하도록 설계
                     time_weight = math.exp(3.0 * (hold_steps / 288.0))
-                    reward = -0.0003 * time_weight
+                    reward += -0.0003 * time_weight
 
         # ── ④ 펀딩비 차감 ──────────────────────────────────────
         self._apply_funding()
 
+        # 최종 보상 클리핑
         reward = float(np.clip(reward, -REWARD_CLIP, REWARD_CLIP))
 
         self.current_step += 1

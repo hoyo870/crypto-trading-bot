@@ -25,7 +25,7 @@ class CryptoTimeSeriesDataset(Dataset):
         y = self.targets[idx + self.seq_length]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long)
 
-# 2. 🌟 [업데이트] 4개의 브랜치로 확장된 신경망
+# 2. 4개 브랜치 기반 신경망
 class MultiBranchCryptoPredictor(nn.Module):
     def __init__(self, num_indicators, num_patterns, hidden_price=64, hidden_vol=32, hidden_ind=64, hidden_pat=32, dropout=0.3):
         super(MultiBranchCryptoPredictor, self).__init__()
@@ -37,7 +37,7 @@ class MultiBranchCryptoPredictor(nn.Module):
         self.lstm_price = nn.LSTM(4, hidden_price, num_layers=2, batch_first=True, dropout=dropout)
         self.lstm_vol = nn.LSTM(1, hidden_vol, num_layers=2, batch_first=True, dropout=dropout)
         self.lstm_ind = nn.LSTM(num_indicators, hidden_ind, num_layers=2, batch_first=True, dropout=dropout)
-        self.lstm_pat = nn.LSTM(num_patterns, hidden_pat, num_layers=2, batch_first=True, dropout=dropout) # 신규: 패턴 전문가
+        self.lstm_pat = nn.LSTM(num_patterns, hidden_pat, num_layers=2, batch_first=True, dropout=dropout)  # 패턴 전문가 브랜치
 
         # 정규화 레이어
         self.bn_price = nn.BatchNorm1d(hidden_price)
@@ -63,7 +63,7 @@ class MultiBranchCryptoPredictor(nn.Module):
         x_price = x[:, :, 0:4]   
         x_vol   = x[:, :, 4:5]   
         x_ind   = x[:, :, 5 : 5 + self.num_ind]    
-        x_pat   = x[:, :, 5 + self.num_ind :] # 신규: 패턴 데이터
+        x_pat   = x[:, :, 5 + self.num_ind :]  # 패턴 데이터
 
         out_price, _ = self.lstm_price(x_price)
         feat_price = self.bn_price(out_price[:, -1, :])
@@ -107,7 +107,7 @@ def prepare_data(filepath, seq_length=120):
     df['hour_sin'] = np.sin(2 * np.pi * dt.dt.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * dt.dt.hour / 24)
 
-    # 🌟 [V5 신규] TA-Lib 10대 핵심 캔들 패턴 추출 (원본 가격 기준)
+    # TA-Lib 10대 핵심 캔들 패턴 추출 (원본 가격 기준)
     o = df['open_raw'].values
     h = df['high_raw'].values
     l = df['low_raw'].values
@@ -191,7 +191,7 @@ def prepare_data(filepath, seq_length=120):
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
 
-    # 🌟 피처 강제 정렬 (가격 -> 거래량 -> 보조지표 -> 패턴)
+    # 피처 순서 고정 (가격 -> 거래량 -> 보조지표 -> 패턴)
     exclude_cols = ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200']
     pat_cols = [c for c in df.columns if c.startswith('pat_')]
     ind_cols = [c for c in df.columns if c not in price_cols + vol_col + pat_cols + exclude_cols]

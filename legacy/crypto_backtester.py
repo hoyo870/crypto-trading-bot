@@ -310,7 +310,7 @@ def run_backtest(data_path, model_path, seq_length=120, threshold_prob=0.60,
         probs = predictions[i]
         
         if current_position == 0:
-            # 🌟 [안전장치] AI가 도박을 거절하고 진짜 확신할 때만 진입
+            # 안전장치: 예측 확률이 임계치 이상일 때만 진입
             long_thr = long_threshold if long_threshold is not None else threshold_prob
             short_thr = short_threshold if short_threshold is not None else threshold_prob
             if probs[1] >= long_thr:

@@ -29,11 +29,6 @@ backup/v2/reports/
 backup/v3/logs/
 backup/v3/reports/
 
-# Trained artifacts
-*.zip
-*.pth
-*.npz
-
 # Keep source datasets and scalers tracked
 !data/*.csv
 !data/commander/*.csv

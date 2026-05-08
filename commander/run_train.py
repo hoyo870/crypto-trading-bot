@@ -132,7 +132,7 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
         seeds_csv=seeds_csv,
     )
     print(f"[INFO] 사용 시드 목록({len(seeds)}): {seeds}")
-    # 🚨 시작 시간 기록
+    # 배치 전체 소요 시간을 측정합니다.
     start_time = time.time()
 
     results = []
@@ -165,7 +165,7 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
             cmd.append("--improved-hp")
 
         print(f"\n[{i+1}/{count}] 학습 시작: tag={tag}, lev={leverage}x, seed={seed}")
-        with open(log_path, "w") as lf:
+        with open(log_path, "w", encoding="utf-8") as lf:
             ret = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=BASE_DIR)
 
         status = "OK" if ret.returncode == 0 else "FAIL"
