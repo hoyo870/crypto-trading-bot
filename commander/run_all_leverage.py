@@ -16,7 +16,7 @@ DEFAULT_PARALLEL_JOBS = 3
 
 DEFAULT_PROFILES = ("stable", "balanced", "aggressive")
 DEFAULT_LEVERAGES = (1,)
-DEFAULT_COUNT_PER_TASK = 20
+DEFAULT_COUNT_PER_TASK = 99
 
 
 def _profile_code(profile):
@@ -46,9 +46,10 @@ def _parse_csv_strs(raw):
 def _build_tasks(leverages, profiles, count_per_task):
     # 실행할 (count, leverage, profile) 작업 목록
     # count_per_task=10이면 (1개 학습 + 즉시 백테스트) 작업 10개를 생성
+    # 프로파일이 초반부터 섞여 실행되도록 라운드로빈 순서로 생성
     tasks = []
-    for lev, profile in product(leverages, profiles):
-        for _ in range(count_per_task):
+    for _ in range(count_per_task):
+        for lev, profile in product(leverages, profiles):
             tasks.append((1, lev, profile))
     return tasks
 

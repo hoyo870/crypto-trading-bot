@@ -114,7 +114,7 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
                     model_dir, log_dir, data_path, top_k,
                     split_mode, train_ratio, eval_ratio, train_ep_steps, eval_window,
                     eval_freq, no_improve_start_ratio,
-                    tuning_profile):
+                    tuning_profile, tag=None):
     os.makedirs(log_dir, exist_ok=True)
     candidates_dir = os.path.join(model_dir, "candidates")
     _preflight_check(data_path=data_path, model_dir=model_dir)
@@ -132,14 +132,19 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
     results = []
     for i in range(count):
         seed = seeds[i]
-        tag = _next_tag(candidates_dir, leverage=leverage, seed=seed)
+        if tag and count == 1:
+            run_tag = str(tag)
+        elif tag and count > 1:
+            run_tag = f"{str(tag)}_{i+1:03d}"
+        else:
+            run_tag = _next_tag(candidates_dir, leverage=leverage, seed=seed)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = os.path.join(log_dir, f"train_{tag}_seed{seed}_{ts}.log")
+        log_path = os.path.join(log_dir, f"train_{run_tag}_seed{seed}_{ts}.log")
 
         cmd = [
             sys.executable,
             os.path.join(BASE_DIR, "train_rl_commander.py"),
-            "--tag", tag,
+            "--tag", run_tag,
             "--leverage", str(leverage),
             "--total-timesteps", str(timesteps),
             "--patience", str(patience),
@@ -159,14 +164,14 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
         if improved_hp:
             cmd.append("--improved-hp")
 
-        print(f"\n[{i+1}/{count}] 학습 시작: tag={tag}, lev={leverage}x, seed={seed}")
+        print(f"\n[{i+1}/{count}] 학습 시작: tag={run_tag}, lev={leverage}x, seed={seed}")
         with open(log_path, "w", encoding="utf-8") as lf:
             ret = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, cwd=BASE_DIR)
 
         status = "OK" if ret.returncode == 0 else "FAIL"
-        results.append((tag, seed, status, log_path))
+        results.append((run_tag, seed, status, log_path))
         elapsed_time = time.time() - start_time
-        print(f"[DONE] {tag} -> {status} | elapsed_time={elapsed_time:.2f}s")
+        print(f"[DONE] {run_tag} -> {status} | elapsed_time={elapsed_time:.2f}s")
 
     _select_top_k_candidates(
         model_dir=model_dir,
@@ -195,6 +200,8 @@ if __name__ == "__main__":
                         help="시드 자동 생성 간격 (기본 1)")
     parser.add_argument("--seeds", type=str, default=None,
                         help="쉼표 구분 시드 목록. 지정 시 base/step보다 우선")
+    parser.add_argument("--tag", type=str, default=None,
+                        help="학습 태그 override (count=1 권장)")
     parser.add_argument("--model-dir", type=str,
                         default=os.path.join(ROOT_DIR, "models", "commander"),
                         help="모델 저장 루트 디렉토리")
@@ -247,4 +254,5 @@ if __name__ == "__main__":
         eval_freq=args.eval_freq,
         no_improve_start_ratio=args.no_improve_start_ratio,
         tuning_profile=args.tuning_profile,
+        tag=args.tag,
     )
