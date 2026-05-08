@@ -3,6 +3,7 @@ import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
 import warnings
+import math
 warnings.filterwarnings('ignore')
 
 # ── 하이퍼파라미터 ───────────────────────────────────────────────
@@ -302,14 +303,17 @@ class LeverageTradingEnv(gym.Env):
                 raw_ret = self._calc_raw_ret(current_price)
                 lev_ret = raw_ret * self.leverage
                 if lev_ret > 0:
-                    # 수익 중: 전고점 갱신 중이면 0점, 조정 중이면 약한 패널티
+                    # 수익 중: 전고점 갱신 중이면 소소한 도파민(+), 조정 중이면 약한 패널티(-)
                     if raw_ret >= self.peak_unrealized_profit:
-                        reward = 0.0
+                        # 🚨 변경 1: 0.0에서 소소한 플러스 점수 부여 (추세 탑승 격려)
+                        reward = 0.0005 
                     else:
                         reward = -(self.peak_unrealized_profit - raw_ret) * 100.0 * 0.1
                 else:
-                    # 손실 중: 고정 패널티
-                    reward = -0.0005
+                    # 🚨 변경 2: 손실 패널티 강도 50% 상향 (-0.0002 -> -0.0003)
+                    # 손실 중: 24시간(288스텝) 누적 패널티가 -3.0점을 돌파하도록 설계
+                    time_weight = math.exp(3.0 * (hold_steps / 288.0))
+                    reward = -0.0003 * time_weight
 
         # ── ④ 펀딩비 차감 ──────────────────────────────────────
         self._apply_funding()

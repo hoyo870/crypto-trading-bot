@@ -355,8 +355,8 @@ if __name__ == "__main__":
     parser.add_argument("--eval-freq", type=int, default=10_000)
     parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--entropy-threshold", type=float, default=-0.01)
-    parser.add_argument("--no-improve-start-ratio", type=float, default=0.2,
-                        help="patience no-improve 체크 시작 비율 (최소 0.2)")
+    parser.add_argument("--no-improve-start-ratio", type=float, default=0.1,
+                        help="patience no-improve 체크 시작 비율 (최소 0.1, 최대 1.0)")
     parser.add_argument("--reward-target", type=float, default=1e9,
                         help="목표 eval reward (매우 크게 설정 시 사실상 비활성)")
     parser.add_argument("--seed", type=int, default=42)

@@ -9,6 +9,7 @@ import os
 import sys
 import subprocess
 import argparse
+import time
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -131,6 +132,8 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
         seeds_csv=seeds_csv,
     )
     print(f"[INFO] 사용 시드 목록({len(seeds)}): {seeds}")
+    # 🚨 시작 시간 기록
+    start_time = time.time()
 
     results = []
     for i in range(count):
@@ -167,7 +170,8 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
 
         status = "OK" if ret.returncode == 0 else "FAIL"
         results.append((tag, seed, status, log_path))
-        print(f"[DONE] {tag} -> {status}")
+        elapsed_time = time.time() - start_time
+        print(f"[DONE] {tag} -> {status} | elapsed_time={elapsed_time:.2f}s")
 
     _select_top_k_candidates(
         model_dir=model_dir,
@@ -176,7 +180,7 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
     )
 
     print("\n" + "=" * 60)
-    print("학습 완료 요약")
+    print(f"학습 완료 요약 (레버리지 {leverage}x) | 총 소요 시간: {elapsed_time:.2f}s")
     print("=" * 60)
     for tag, seed, status, log_path in results:
         print(f"  tag={tag} (seed={seed})  ->  {status}  | log={log_path}")
@@ -219,8 +223,8 @@ if __name__ == "__main__":
                         help="평가 에피소드 길이")
     parser.add_argument("--eval-freq", type=int, default=10_000,
                         help="EvalCallback 평가 주기 (timesteps 단위)")
-    parser.add_argument("--no-improve-start-ratio", type=float, default=0.2,
-                        help="patience no-improve 체크 시작 비율 (최소 0.2)")
+    parser.add_argument("--no-improve-start-ratio", type=float, default=0.1,
+                        help="patience no-improve 체크 시작 비율 (최소 0.1, 최대 1.0)")
     args = parser.parse_args()
 
     run_train_batch(

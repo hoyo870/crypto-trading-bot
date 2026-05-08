@@ -15,9 +15,9 @@ DEFAULT_PARALLEL_JOBS = 3
 def _build_tasks():
     # 실행할 (count, leverage) 작업 목록
     return [
-        (2, 1),
-        (2, 3),
-        (2, 5)
+        (10, 1),
+        (10, 3),
+        (10, 5)
     ]
 
 
@@ -28,7 +28,7 @@ def _launch_training(count, leverage):
         "--count", str(count),
         "--leverage", str(leverage),
         "--seeds", ",".join(str(random.randint(0, 10000)) for _ in range(count)),
-        "--no-improve-start-ratio", "0.1"
+        "--no-improve-start-ratio", "0.2",  # 학습 초반 20%는 no-improve 카운트 시작 안 함
     ]
     return subprocess.Popen(cmd, cwd=BASE_DIR)
 
