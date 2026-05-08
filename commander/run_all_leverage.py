@@ -4,6 +4,7 @@ import subprocess
 import random
 import time
 import argparse
+from datetime import datetime
 from collections import deque
 from itertools import product
 
@@ -14,34 +15,25 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PARALLEL_JOBS = 3
 
 DEFAULT_PROFILES = ("stable", "balanced", "aggressive")
-DEFAULT_LEVERAGES = (1, 1, 1)
-DEFAULT_COUNT_PER_TASK = 10
+DEFAULT_LEVERAGES = (1,)
+DEFAULT_COUNT_PER_TASK = 20
 
 
-def _resolve_latest_tags_for_seeds(candidates_dir, leverage, seeds):
-    resolved = []
-    if not os.path.isdir(candidates_dir):
-        return resolved
+def _profile_code(profile):
+    table = {
+        "stable": "stb",
+        "balanced": "bal",
+        "aggressive": "agg",
+    }
+    return table.get(str(profile).lower(), "unk")
 
-    for seed in seeds:
-        prefix = f"lev{int(leverage)}_seed{int(seed)}_"
-        max_idx = -1
-        best_tag = None
-        for f in os.listdir(candidates_dir):
-            if not f.endswith(".zip"):
-                continue
-            stem = f[:-4]
-            if not stem.startswith(prefix):
-                continue
-            suffix = stem[len(prefix):]
-            if suffix.isdigit() and len(suffix) == 3:
-                idx = int(suffix)
-                if idx > max_idx:
-                    max_idx = idx
-                    best_tag = stem
-        if best_tag is not None:
-            resolved.append(best_tag)
-    return resolved
+
+def _build_tag(leverage, profile, seed):
+    # 태그 예: lev1_bal_seed3555_t123456_r042
+    prof = _profile_code(profile)
+    ts = datetime.now().strftime("%H%M%S")
+    nonce = random.randint(0, 999)
+    return f"lev{int(leverage)}_{prof}_seed{int(seed)}_t{ts}_r{nonce:03d}"
 
 def _parse_csv_ints(raw):
     return [int(x.strip()) for x in str(raw).split(",") if x.strip()]
@@ -63,18 +55,20 @@ def _build_tasks(leverages, profiles, count_per_task):
 
 def _launch_training(count, leverage, tuning_profile):
     seeds = [random.randint(0, 10000) for _ in range(count)]
+    tags = [_build_tag(leverage, tuning_profile, s) for s in seeds]
     cmd = [
         sys.executable,
         os.path.join(BASE_DIR, "run_train.py"),
         "--count", str(count),
         "--leverage", str(leverage),
         "--tuning-profile", tuning_profile,
+        "--tag", tags[0],
         "--top-k", "0",
         "--seeds", ",".join(str(s) for s in seeds),
         "--no-improve-start-ratio", "0.1",  # 학습 초반 10%는 no-improve 카운트 시작 안 함
         "--split-mode", "holdout",
     ]
-    return subprocess.Popen(cmd, cwd=BASE_DIR), seeds
+    return subprocess.Popen(cmd, cwd=BASE_DIR), seeds, tags
 
 
 def _run_backtest_after_training(tags, leverage, tuning_profile):
@@ -133,16 +127,16 @@ def run_parallel_trainings(parallel_jobs=DEFAULT_PARALLEL_JOBS,
             print(f"\n{'*'*50}")
             print(f"▶️ 실행 시작: 레버리지 {leverage}x | profile={profile} | 모델 {count}개")
             print(f"{'*'*50}\n")
-            proc, seeds = _launch_training(count, leverage, profile)
+            proc, seeds, tags = _launch_training(count, leverage, profile)
 
-            active.append((proc, count, leverage, profile, seeds))
+            active.append((proc, count, leverage, profile, seeds, tags))
 
-        for proc, count, leverage, profile, seeds in active[:]:
+        for proc, count, leverage, profile, seeds, tags in active[:]:
             ret = proc.poll()
             if ret is None:
                 continue
 
-            active.remove((proc, count, leverage, profile, seeds))
+            active.remove((proc, count, leverage, profile, seeds, tags))
 
             if ret != 0:
                 print(
@@ -150,22 +144,17 @@ def run_parallel_trainings(parallel_jobs=DEFAULT_PARALLEL_JOBS,
                     f"훈련 중 치명적인 에러 발생! (Exit code: {ret})"
                 )
                 print("[INFO] 안전을 위해 실행 중인 나머지 훈련을 모두 중단합니다.")
-                for other_proc, _, _, _, _ in active:
+                for other_proc, _, _, _, _, _ in active:
                     if other_proc.poll() is None:
                         other_proc.terminate()
-                for other_proc, _, _, _, _ in active:
+                for other_proc, _, _, _, _, _ in active:
                     other_proc.wait()
                 sys.exit(ret)
 
             print(f"\n[SUCCESS] ✅ 레버리지 {leverage}x | profile={profile} 훈련 무사히 완료!")
 
             if run_backtest:
-                candidates_dir = os.path.join(os.path.dirname(BASE_DIR), "models", "commander", "candidates")
-                resolved_tags = _resolve_latest_tags_for_seeds(candidates_dir, leverage, seeds)
-                if not resolved_tags:
-                    print("[WARN] 학습 직후 백테스트 대상 태그를 찾지 못해 이번 건은 건너뜁니다.")
-                else:
-                    _run_backtest_after_training(resolved_tags, leverage, profile)
+                _run_backtest_after_training(tags, leverage, profile)
 
         # 과도한 busy-loop 방지
         if active:
