@@ -1,38 +1,51 @@
-# Python
+# ==========================================
+# 1. Python & Environments
+# ==========================================
 __pycache__/
 *.pyc
-
-# Virtual Environment
 env/
 venv/
 .env
 
-# Data & Models (대용량 파일 제외)
-# data/*.csv
-# models/*.pth
-!data/scalers/*.pkl
+# ==========================================
+# 2. OS Files
+# ==========================================
 .DS_Store
 
-# Signal log files
-signal_logs_*.txt
-
-# Backtest result charts
-backtest_*.png
-
-# Runtime outputs
-logs/
-reports/
-commander/logs/
-commander/reports/
-backup/v2/logs/
-backup/v2/reports/
-backup/v3/logs/
-backup/v3/reports/
-models/commander/candidates/*.zip
-models/commander/runs/*/*.zip
-models/commander/runs/*/*.npz
-
-# Keep source datasets and scalers tracked
+# ==========================================
+# 3. Data (데이터셋 및 스케일러)
+# ==========================================
+# 기본적으로 데이터 폴더의 csv는 용량이 크므로 무시하지만, 
+# 현재 프로젝트 특성상 추적해야 하므로 예외(!) 처리합니다.
 !data/*.csv
-!data/commander/*.csv
+!data/raw/*.csv
+!data/processed/*.csv
+!data/signals/*.csv
 !data/scalers/*.pkl
+
+# ==========================================
+# 4. Runtime Outputs (훈련 중 생성되는 쓰레기 파일)
+# ==========================================
+# 텐서보드 로그 전체 무시
+logs/
+
+# 백테스트 차트 및 리포트 전체 무시
+reports/
+
+# ==========================================
+# 5. Checkpoints (모델 가중치)
+# ==========================================
+# Base Expert 모델들은 용량이 작고 핵심이므로 추적할 수 있지만, 필요시 주석 해제하여 무시
+# checkpoints/base_experts/*.pth 
+
+# 강화학습 진화 파이프라인에서 생성되는 수많은 zip 가중치는 Git 용량 초과를 유발하므로 무시
+checkpoints/rl_generations/**/*.zip
+
+# 💡 [예외 처리] 단, 매 세대의 최종 우승자(best_gen.zip)는 Git에 올려서 보존하고 싶다면 아래 주석을 해제하세요!
+!checkpoints/rl_generations/**/best_gen*.zip
+
+# ==========================================
+# 6. Legacy (과거 흔적 방어용)
+# ==========================================
+signal_logs_*.txt
+backtest_*.png

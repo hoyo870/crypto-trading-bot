@@ -15,6 +15,7 @@ import argparse
 import subprocess
 import shutil
 import pandas as pd
+import glob
 from pathlib import Path
 
 # ── 경로 설정 ─────────────────────────────────────────────────────────────
@@ -34,44 +35,45 @@ def get_current_generation(checkpoints_dir):
     return max([int(g.replace("gen", "")) for g in gens])
 
 # ── 2. 자동 폐기(Garbage Collector) ─────────────────────────────────────────
-def auto_discard_models(reports_dir, model_dir, keep_top_k):
-    """백테스트 결과를 읽어 Top K에 들지 못한 모델과 로그, 차트를 물리적으로 삭제합니다."""
+def auto_discard_models(reports_dir, model_dir, log_dir, keep_top_k):
+    """백테스트 결과를 읽어 Top K에 들지 못한 모델과 로그, 차트를 물리적으로 완벽히 삭제합니다."""
     summary_file = os.path.join(reports_dir, "best_by_leverage.csv")
     if not os.path.exists(summary_file):
-        print("⚠️ [경고] 백테스트 요약 파일을 찾을 수 없어 폐기 작업을 건너뜁니다.")
+        print("⚠️ [경고] 백테스트 요약 파일이 없어 폐기 작업을 건너뜁니다.")
         return None
 
-    # CSV 읽기 (metric_value가 높은 순으로 정렬)
     df = pd.read_csv(summary_file)
     df = df.sort_values(by="metric_value", ascending=False).reset_index(drop=True)
-    
     survivors = df.head(keep_top_k)["tag"].tolist()
     best_model_tag = survivors[0] if survivors else None
     
     print(f"\n🧹 [자동 폐기 가동] 생존자 탑 {keep_top_k}명: {survivors}")
     
     deleted_count = 0
-    # 모델 폴더 스캔 및 폐기
     for item in os.listdir(model_dir):
         if item.startswith("."): continue
         item_tag = item[:-4] if item.endswith(".zip") else item
         
-        # 생존자 명단에 없으면 무자비하게 삭제
+        # 💀 생존자 명단에 없으면 무자비하게 3단 삭제 (가중치/리포트/로그)
         if item_tag not in survivors and item_tag != "best_by_leverage.csv":
+            # 1. 모델 가중치 삭제
             target_path = os.path.join(model_dir, item)
-            
-            # 모델 가중치(zip) 및 폴더 삭제
             if os.path.isdir(target_path): shutil.rmtree(target_path)
             else: os.remove(target_path)
             
-            # 찌꺼기 리포트/차트도 삭제
-            for ext in [".json", ".txt", ".png"]:
-                report_trash = os.path.join(reports_dir, f"rl_backtest_*{item_tag}*{ext}")
-                os.system(f"rm -f {report_trash}")
+            # 2. 리포트 및 차트 파일 싹쓸이 (Python glob 사용으로 안정성 100%)
+            for file_path in glob.glob(os.path.join(reports_dir, f"*{item_tag}*")):
+                try: os.remove(file_path)
+                except Exception: pass
+            
+            # 3. 텐서보드 로그 폴더 싹쓸이
+            for log_folder in glob.glob(os.path.join(log_dir, f"{item_tag}*")):
+                try: shutil.rmtree(log_folder)
+                except Exception: pass
                 
             deleted_count += 1
             
-    print(f"✅ 총 {deleted_count}개의 열등한 모델과 찌꺼기 리포트가 소각되었습니다.\n")
+    print(f"✅ 총 {deleted_count}개의 열등한 모델(가중치/차트/로그)이 완벽히 소각되었습니다.\n")
     return best_model_tag
 
 
@@ -79,6 +81,7 @@ def auto_discard_models(reports_dir, model_dir, keep_top_k):
 def run_evolution_pipeline(args):
     checkpoints_root = os.path.join(ROOT_DIR, "checkpoints", "rl_generations")
     reports_root = os.path.join(ROOT_DIR, "reports")
+    logs_root = os.path.join(ROOT_DIR, "logs", "train")
     
     current_gen = get_current_generation(checkpoints_root)
     start_gen = current_gen
@@ -94,9 +97,10 @@ def run_evolution_pipeline(args):
         gen_str = f"gen{gen}"
         gen_model_dir = os.path.join(checkpoints_root, gen_str)
         gen_reports_dir = os.path.join(reports_root, gen_str)
-        
+        gen_logs_dir = os.path.join(logs_root, gen_str)
         os.makedirs(gen_model_dir, exist_ok=True)
         os.makedirs(gen_reports_dir, exist_ok=True)
+        os.makedirs(gen_logs_dir, exist_ok=True)
         
         print(f"\n🌱 [시작] {gen_str} 세대 배양을 시작합니다...")
         
@@ -104,7 +108,9 @@ def run_evolution_pipeline(args):
         train_cmd = [
             sys.executable, TRAIN_BATCH_SCRIPT,
             "--count-per-task", str(args.count_per_task),
-            "--jobs", str(args.jobs)
+            "--jobs", str(args.jobs),
+            "--leverages", args.leverages,
+            "--profiles", args.profiles
         ]
         if parent_model_path:
             train_cmd.extend(["--load-model", parent_model_path])
@@ -112,6 +118,8 @@ def run_evolution_pipeline(args):
         # 04_train_rl_batch.py에 환경 변수로 현재 세대 경로를 넘겨줌
         env_vars = os.environ.copy()
         env_vars["CUSTOM_MODEL_DIR"] = gen_model_dir
+        env_vars["CUSTOM_LOG_DIR"] = gen_logs_dir
+        env_vars["PYTHONIOENCODING"] = "utf-8"
         
         # 04_train 스크립트 실행 (백테스트는 파이프라인에서 직접 통제하므로 no-backtest 옵션 추가 요망)
         subprocess.run(train_cmd, env=env_vars, cwd=ROOT_DIR)
@@ -121,22 +129,32 @@ def run_evolution_pipeline(args):
         bt_cmd = [
             sys.executable, BACKTEST_SCRIPT,
             "--model-dir", gen_model_dir,
-            "--reports-dir", gen_reports_dir
+            "--reports-dir", gen_reports_dir,
+            "--jobs", str(args.jobs)
         ]
         subprocess.run(bt_cmd, cwd=ROOT_DIR)
         
         # --- [Phase 3: 자동 폐기 및 다음 세대 부모 선발] ---
-        best_tag = auto_discard_models(gen_reports_dir, gen_model_dir, args.auto_discard_top)
+        best_tag = auto_discard_models(gen_reports_dir, gen_model_dir, gen_logs_dir, args.auto_discard_top)
         
         if best_tag:
-            # 1등 모델의 zip 파일 경로를 다음 세대의 부모로 지정
+            # 1. 1등 모델의 zip 파일 경로를 정확히 탐색
             parent_model_path = os.path.join(gen_model_dir, f"{best_tag}.zip")
             if not os.path.exists(parent_model_path):
-                # 폴더 안에 저장된 경우
+                # 폴더 안에 저장된 경우의 Fallback
                 parent_model_path = os.path.join(gen_model_dir, best_tag, f"final_model_{best_tag}.zip")
                 
             print(f"👑 [{gen_str}] 최종 우승자: {best_tag}")
             print(f"➡️ 이 모델이 {gen+1}세대의 부모 유전자로 투입됩니다.")
+
+            # ✅ 2. 교정된 복사 로직 (정확히 탐색된 parent_model_path 활용)
+            winner_dst = os.path.join(gen_model_dir, f"best_{gen_str}.zip")
+            if os.path.exists(parent_model_path):
+                shutil.copy2(parent_model_path, winner_dst)
+                print(f"📂 [복사완료] 우승 모델이 {winner_dst} 로 복사(보존) 되었습니다.")
+                
+                # 다음 세대로 넘겨줄 경로를, 방금 예쁘게 복사한 best_gen.zip 으로 교체!
+                parent_model_path = winner_dst
         else:
             print("❌ [치명적 에러] 생존한 모델이 없습니다. 진화를 중단합니다.")
             break
@@ -155,7 +173,7 @@ def run_evolution_pipeline(args):
 #            백테스트 결과 1~3등(기본값)만 남기고 나머지는 자동 폐기합니다.
 #
 # 2️⃣ 시나리오 2: "내일 아침까지 알아서 3세대 진화시켜놔" (연속 세대 진화)
-#    ▶ python run_evolution.py --target-generations 3 --auto-discard-top 1 --count-per-task 33
+#    ▶ python run_evolution.py --target-generations 3 --auto-discard-top 1 --leverages 1,3,5 --profiles stable,balanced,aggressive --count-per-task 33
 #    - 설명: Gen1 훈련 -> 백테스트 1등 선발 (나머지 삭제) -> 1등 뇌를 Gen2에 이식 ->
 #            Gen2 훈련 -> 백테스트 1등 선발 (나머지 삭제) -> 1등 뇌를 Gen3에 이식.
 #            내일 아침에는 Gen3의 궁극체 1개만 폴더에 남게 됩니다.
@@ -177,7 +195,7 @@ if __name__ == "__main__":
         epilog="""
 [실행 예시]
   python run_evolution.py --target-generations 1 --count-per-task 10
-  python run_evolution.py --target-generations 3 --auto-discard-top 1
+  python run_evolution.py --target-generations 3 --auto-discard-top 1 --leverages 1,3,5 --profiles stable,balanced,aggressive --count-per-task 33
   python run_evolution.py --initial-parent "checkpoints/rl_generations/gen1/best.zip"
         """
     )
@@ -195,6 +213,10 @@ if __name__ == "__main__":
                         help="각 (레버리지, 프로파일) 조합당 훈련할 씨앗(Seed) 개체 수 (기본: 10)")
     parser.add_argument("--jobs", type=int, default=3, 
                         help="동시 실행할 병렬 프로세스 수 (M1 Max 권장: 3)")
+    parser.add_argument("--leverages", type=str, default="1,3,5", 
+                        help="훈련할 레버리지 목록 (쉼표 구분, 기본: 1,3,5)")
+    parser.add_argument("--profiles", type=str, default="stable,balanced,aggressive", 
+                        help="훈련할 프로파일 목록 (쉼표 구분, 기본: stable,balanced,aggressive)")
     
     # 자동 폐기 옵션
     parser.add_argument("--auto-discard-top", type=int, default=3, 

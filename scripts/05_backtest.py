@@ -1,8 +1,8 @@
 """
-Commander 일괄 백테스트 실행기 (단일/배치 통합본)
+Commander 일괄 백테스트 실행기 (병렬 멀티프로세싱 최적화)
 
-단일 모델 백테스트, 다중 모델 앙상블 투표, 여러 폴더의 일괄 백테스트 및 
-베스트 모델 자동 선출까지 이 스크립트 하나로 완벽히 제어합니다.
+단일 모델 백테스트, 다중 모델 앙상블 투표, 여러 폴더의 일괄 백테스트를
+M1 Max 멀티 코어를 활용하여 초고속으로 동시 처리합니다.
 """
 
 import os
@@ -14,17 +14,22 @@ import traceback
 from datetime import datetime
 import numpy as np
 import pandas as pd
+
+# 멀티프로세싱 중 차트 충돌(GUI 에러) 방지를 위한 Agg 백엔드 강제
+import matplotlib
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from stable_baselines3 import PPO
 
+from stable_baselines3 import PPO
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import warnings
 warnings.filterwarnings('ignore')
 
-# ── 경로 설정 (새로운 아키텍처 반영) ──────────────────────────────────────────
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))      # scripts/
-ROOT_DIR = os.path.dirname(SCRIPT_DIR)                       # 프로젝트 루트
-SRC_DIR = os.path.join(ROOT_DIR, "src")                      # 소스 코드 디렉토리
+# ── 경로 설정 ──────────────────────────────────────────────────────────
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))      
+ROOT_DIR = os.path.dirname(SCRIPT_DIR)                       
+SRC_DIR = os.path.join(ROOT_DIR, "src")                      
 
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -38,21 +43,15 @@ def _infer_leverage_from_tag(tag):
     return int(match.group(1)) if match else None
 
 def _resolve_model_path(model_tag, model_dir):
-    """태그 이름을 기반으로 정확한 zip 파일 경로를 찾습니다."""
     tag = model_tag[:-4] if model_tag.endswith(".zip") else model_tag
-    
-    # 1. 태그 이름의 폴더 안의 final_model_ / best_model_ 탐색
     tag_folder = os.path.join(model_dir, tag)
     if os.path.isdir(tag_folder):
         for f in os.listdir(tag_folder):
             if f.endswith(".zip") and ("final" in f or "best" in f):
                 return os.path.join(tag_folder, f)
-    
-    # 2. 태그.zip 파일이 디렉토리에 바로 있는 경우
     direct_zip = os.path.join(model_dir, f"{tag}.zip")
     if os.path.exists(direct_zip):
         return direct_zip
-        
     return None
 
 def _calc_mdd(balances):
@@ -69,15 +68,6 @@ def _calc_sharpe(balances, steps_per_year=105120):
     if sigma == 0: return 0.0
     return float(mu / sigma * np.sqrt(steps_per_year))
 
-def _majority_vote(actions):
-    counts = {}
-    for a in actions:
-        counts[a] = counts.get(a, 0) + 1
-    ranked = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
-    if len(ranked) >= 2 and ranked[0][1] == ranked[1][1]:
-        return 0
-    return ranked[0][0]
-
 def _load_all_datetimes(data_path):
     df = pd.read_csv(data_path, usecols=["datetime"])
     return pd.to_datetime(df["datetime"], errors="coerce").reset_index(drop=True)
@@ -92,7 +82,6 @@ def _metric_value(summary, metric):
     if metric == "sharpe_ratio": return float(summary.get("sharpe_ratio", float("-inf")))
     if metric == "mdd_pct": return float(summary.get("mdd_pct", float("-inf")))
     
-    # composite score (육각형 통합 지표)
     total_return = float(summary.get("total_return_pct", 0.0))
     sharpe = float(summary.get("sharpe_ratio", 0.0))
     mdd = abs(float(summary.get("mdd_pct", 0.0)))
@@ -111,66 +100,31 @@ def run_rl_backtest(model_paths, model_tag, leverage, data_path, reports_dir, tu
 
     done = False
     balances = [env.balance]
-    trades = []
-    open_trade = None
     liq_steps = []
 
+    # 병렬 처리 중 터미널 로그 꼬임 방지를 위해 print문 최소화
     while not done:
         pre_step = env.current_step
         pre_position = env.position
-        pre_balance = env.balance
-        pre_price = float(env.closes[min(pre_step, env.max_steps - 1)])
-
-        # 앙상블 다수결 투표 로직
+        
         votes = []
         for model in models:
             action, _ = model.predict(obs, deterministic=True)
             act = int(action) if np.ndim(action) == 0 else int(action[0])
             votes.append(act)
-        act_val = votes[0] if len(votes) == 1 else _majority_vote(votes)
+        
+        # 단순 다수결
+        if len(votes) == 1: act_val = votes[0]
+        else:
+            counts = {a: votes.count(a) for a in set(votes)}
+            act_val = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[0][0]
 
         obs, reward, terminated, truncated, info = env.step(act_val)
         done = terminated or truncated
         balances.append(env.balance)
 
-        # 청산 감지
         if info.get('liquidated') and pre_position != 0:
             liq_steps.append(pre_step)
-            if open_trade is not None:
-                net_pct = ((env.balance - open_trade["entry_equity"]) / max(open_trade["entry_equity"], 1e-8)) * 100.0
-                trades.append({
-                    "side": open_trade["side"],
-                    "entry_time": open_trade["entry_time"],
-                    "exit_time": _step_to_dt_str(pre_step, all_time_index),
-                    "holding_steps": pre_step - open_trade["entry_step"],
-                    "net_return_pct": net_pct,
-                    "exit_type": "liquidated",
-                })
-                open_trade = None
-
-        # 진입 기록
-        if pre_position == 0 and env.position != 0:
-            open_trade = {
-                "side": "LONG" if env.position == 1 else "SHORT",
-                "margin_size": env.position_size,
-                "entry_equity": pre_balance,
-                "entry_step": pre_step,
-                "entry_time": _step_to_dt_str(pre_step, all_time_index),
-                "entry_price": pre_price,
-            }
-
-        # 정상 청산 감지
-        if pre_position != 0 and env.position == 0 and not info.get('liquidated') and open_trade is not None:
-            net_ret = ((env.balance - open_trade["entry_equity"]) / max(open_trade["entry_equity"], 1e-8))
-            trades.append({
-                "side": open_trade["side"],
-                "entry_time": open_trade["entry_time"],
-                "exit_time": _step_to_dt_str(pre_step, all_time_index),
-                "holding_steps": pre_step - open_trade["entry_step"],
-                "net_return_pct": net_ret * 100.0,
-                "exit_type": "forced" if done else "manual",
-            })
-            open_trade = None
 
     # 요약 정보 산출
     final_balance = info.get('final_balance', env.balance)
@@ -192,89 +146,81 @@ def run_rl_backtest(model_paths, model_tag, leverage, data_path, reports_dir, tu
     }
 
     # 차트 그리기 및 저장
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(10, 5))
     plt.plot(all_time_index.iloc[:len(balances)], balances, label=f'{model_tag} ({leverage}x)', color='blue')
     plt.axhline(env.initial_balance, color='red', linestyle='--')
     if liq_steps:
         liq_times = [all_time_index.iloc[s] for s in liq_steps if s < len(all_time_index)]
         liq_bals  = [balances[min(s, len(balances)-1)] for s in liq_steps]
-        plt.scatter(liq_times, liq_bals, color='red', s=80, zorder=5, label='Liquidation')
-    plt.title(f'Backtest Equity Curve: {model_tag}', fontweight='bold')
+        plt.scatter(liq_times, liq_bals, color='red', s=60, zorder=5, label='Liquidation')
+    plt.title(f'Backtest: {model_tag}', fontweight='bold')
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
     
     os.makedirs(reports_dir, exist_ok=True)
-    plt.savefig(os.path.join(reports_dir, f"rl_backtest_chart_{model_tag}.png"), dpi=300)
+    plt.savefig(os.path.join(reports_dir, f"rl_backtest_chart_{model_tag}.png"), dpi=200)
     plt.close()
 
-    # JSON 저장
     with open(os.path.join(reports_dir, f"rl_backtest_summary_{model_tag}.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     return summary
 
 
-# ── 자동 태그 검색기 ────────────────────────────────────────────────────────
-def _auto_discover_tags(model_dir):
-    """rl_generations 폴더 안에 있는 모든 zip 파일과 훈련 완료 폴더를 찾습니다."""
-    if not os.path.isdir(model_dir): return []
-    tags = []
-    for item in os.listdir(model_dir):
-        if item.startswith("."): continue
-        # Zip 파일인 경우
-        if item.endswith(".zip"):
-            tags.append(item[:-4])
-        # 폴더인 경우 (내부에 zip이 있는지 확인)
-        elif os.path.isdir(os.path.join(model_dir, item)):
-            for f in os.listdir(os.path.join(model_dir, item)):
-                if f.endswith(".zip"):
-                    tags.append(item)
-                    break
-    return sorted(list(set(tags)))
-
-
-# ── 배치 매니저 ─────────────────────────────────────────────────────────────
-def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
-                     tuning_profile, best_metric, pick_best_per_leverage=True,
-                     best_output_path=None):
-    results = []
-    total = len(tags)
-    
-    print(f"\\n{'='*60}")
-    print(f"🚀 총 {total}개 모델 일괄 백테스트 가동 시작")
-    print(f"{'='*60}")
-
-    for idx, tag in enumerate(tags, 1):
+# ── 멀티프로세싱 워커(Worker) 함수 ─────────────────────────────────────────
+def _backtest_worker(tag, leverage_override, model_dir, data_path, reports_dir, tuning_profile):
+    try:
         leverage = leverage_override if leverage_override else _infer_leverage_from_tag(tag)
-        if leverage is None: leverage = 2  # Fallback
+        if leverage is None: leverage = 2 
 
         model_path = _resolve_model_path(tag, model_dir)
         if not model_path:
-            print(f"[{idx:02d}/{total}] ❌ 실패: {tag} (모델 파일을 찾을 수 없음)")
-            continue
+            return tag, leverage, None, "모델 파일을 찾을 수 없음"
             
-        print(f"[{idx:02d}/{total}] ⏳ 백테스트 중: {tag} (Lev: {leverage}x) ... ", end="", flush=True)
+        summary = run_rl_backtest([model_path], tag, leverage, data_path, reports_dir, tuning_profile)
+        return tag, leverage, summary, None
+    except Exception as e:
+        return tag, leverage_override, None, str(e)
+
+
+# ── 병렬 배치 매니저 ────────────────────────────────────────────────────────
+def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir, tuning_profile, best_metric, jobs):
+    results = []
+    total = len(tags)
+    
+    print(f"\n{'='*70}")
+    print(f"🚀 총 {total}개 모델 병렬 일괄 백테스트 가동 시작 (코어: {jobs}개)")
+    print(f"{'='*70}")
+
+    # M1 Max 코어를 100% 활용하는 ProcessPoolExecutor
+    with ProcessPoolExecutor(max_workers=jobs) as executor:
+        futures = {
+            executor.submit(_backtest_worker, tag, leverage_override, model_dir, data_path, reports_dir, tuning_profile): tag 
+            for tag in tags
+        }
         
-        try:
-            # 단일 백테스트 실행
-            summary = run_rl_backtest([model_path], tag, leverage, data_path, reports_dir, tuning_profile)
-            results.append({"tag": tag, "leverage": leverage, "summary": summary})
-            status = "✅ 청산됨" if summary["liquidated"] else "✅ 완료"
-            print(status)
-        except Exception as e:
-            print(f"❌ 에러 발생 ({str(e)})")
-            traceback.print_exc()
+        completed = 0
+        for future in as_completed(futures):
+            tag, lev, summary, err = future.result()
+            completed += 1
+            
+            if err:
+                print(f"[{completed:03d}/{total}] ❌ 실패: {tag} ({err})")
+            else:
+                status = "⚠️ 청산" if summary["liquidated"] else "✅ 완료"
+                print(f"[{completed:03d}/{total}] {status}: {tag} (Lev: {lev}x) => 수익률: {summary.get('total_return_pct', 0):+7.2f}% | MDD: {summary.get('mdd_pct', 0):5.2f}%")
+                results.append({"tag": tag, "leverage": lev, "summary": summary})
 
     # ── 레버리지별 베스트 모델 산출 ──
-    if results and pick_best_per_leverage:
+    if results:
         grouped = {}
         for r in results:
             grouped.setdefault(r["leverage"], []).append(r)
 
         best_lines = ["leverage,tag,metric,metric_value,total_return_pct,mdd_pct,sharpe_ratio,liquidated"]
-        print(f"\\n{'='*60}")
+        print(f"\n{'='*70}")
         print(f"🏆 레버리지별 베스트 모델 (기준: {best_metric})")
-        print(f"{'='*60}")
+        print(f"{'='*70}")
         
         for lev in sorted(grouped.keys()):
             candidates = grouped[lev]
@@ -287,52 +233,49 @@ def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
             best_lines.append(line)
             
             print(f"[Lev {lev}x] 1등: {best['tag']}")
-            print(f"   => 수익률: {s.get('total_return_pct'):+.2f}% | MDD: {s.get('mdd_pct'):.2f}% | 승률: {s.get('win_rate'):.1f}%\\n")
+            print(f"   => 수익률: {s.get('total_return_pct'):+.2f}% | MDD: {s.get('mdd_pct'):.2f}% | 승률: {s.get('win_rate'):.1f}%\n")
 
-        if not best_output_path:
-            best_output_path = os.path.join(reports_dir, "best_by_leverage.csv")
+        best_output_path = os.path.join(reports_dir, "best_by_leverage.csv")
         with open(best_output_path, "w", encoding="utf-8") as f:
-            f.write("\\n".join(best_lines) + "\\n")
-        print(f"💾 베스트 결과 저장 완료: {best_output_path}\\n")
+            f.write("\n".join(best_lines) + "\n")
+        print(f"💾 베스트 결과 저장 완료: {best_output_path}\n")
+
+
+def _auto_discover_tags(model_dir):
+    if not os.path.isdir(model_dir): return []
+    tags = []
+    for item in os.listdir(model_dir):
+        if item.startswith("."): continue
+        if item.endswith(".zip"): tags.append(item[:-4])
+        elif os.path.isdir(os.path.join(model_dir, item)):
+            for f in os.listdir(os.path.join(model_dir, item)):
+                if f.endswith(".zip"):
+                    tags.append(item)
+                    break
+    return sorted(list(set(tags)))
 
 
 # ── 메인 진입점 ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Commander 일괄 백테스트 (통합본)")
+    parser = argparse.ArgumentParser(description="Commander 일괄 백테스트 (병렬 지원)")
     
-    # 신규 디렉토리 아키텍처 기본값
     default_model_dir = os.path.join(ROOT_DIR, "checkpoints", "rl_generations")
     default_data_path = os.path.join(ROOT_DIR, "data", "signals", "base_signals_log.csv")
     default_reports_dir = os.path.join(ROOT_DIR, "reports")
 
-    parser.add_argument("--tags", type=str, default=None, help="쉼표 구분 태그 (지정 안 하면 폴더 내 전체 자동검색)")
-    parser.add_argument("--leverage", type=int, default=None, help="레버리지 강제 지정 (기본: 태그명에서 추론)")
+    parser.add_argument("--tags", type=str, default=None, help="쉼표 구분 태그 (지정 안 하면 폴더 내 전체 스캔)")
+    parser.add_argument("--leverage", type=int, default=None, help="레버리지 강제 지정")
     parser.add_argument("--model-dir", type=str, default=default_model_dir, help="모델 가중치 폴더")
     parser.add_argument("--data-path", type=str, default=default_data_path, help="베이스 신호 데이터 CSV")
     parser.add_argument("--reports-dir", type=str, default=default_reports_dir, help="리포트 및 차트 출력 폴더")
     parser.add_argument("--tuning-profile", type=str, choices=["stable", "balanced", "aggressive"], default="balanced")
-    parser.add_argument("--best-metric", type=str, choices=["score", "total_return_pct", "sharpe_ratio", "mdd_pct"], default="score", help="1등 선발 기준")
-    parser.add_argument("--source", type=str, default=None, help="레거시 호환 인자(현재 미사용)")
-    parser.add_argument("--workers", type=int, default=1, help="레거시 호환 인자(현재 단일 프로세스 실행)")
-    parser.add_argument("--pick-best-per-leverage", action="store_true", default=True,
-                        help="레버리지별 베스트 모델 CSV 생성")
-    parser.add_argument("--no-pick-best-per-leverage", dest="pick_best_per_leverage", action="store_false",
-                        help="레버리지별 베스트 모델 CSV 생성을 비활성화")
-    parser.add_argument("--best-output", type=str, default=None, help="베스트 CSV 출력 경로 override")
+    parser.add_argument("--best-metric", type=str, choices=["score", "total_return_pct", "sharpe_ratio", "mdd_pct"], default="score")
+    parser.add_argument("--jobs", type=int, default=5, help="백테스트 동시 실행 프로세스 수 (기본: 5)")
     
     args = parser.parse_args()
 
-    if not os.path.exists(args.data_path):
-        print(f"[ERROR] 데이터 파일이 없습니다: {args.data_path}")
-        sys.exit(1)
-    if not os.path.exists(args.model_dir):
-        print(f"[ERROR] 모델 폴더가 없습니다: {args.model_dir}")
-        sys.exit(1)
-
-    if args.source:
-        print("[INFO] --source 인자는 현재 통합 백테스트에서 사용되지 않습니다.")
-    if args.workers > 1:
-        print("[INFO] --workers>1 은 현재 미지원이며 단일 프로세스로 실행합니다.")
+    # 환경변수 연동 (run_evolution.py 호환성)
+    args.model_dir = os.environ.get("CUSTOM_MODEL_DIR", args.model_dir)
 
     if args.tags:
         tags = [t.strip() for t in args.tags.split(",") if t.strip()]
@@ -350,6 +293,5 @@ if __name__ == "__main__":
         reports_dir=args.reports_dir,
         tuning_profile=args.tuning_profile,
         best_metric=args.best_metric,
-        pick_best_per_leverage=args.pick_best_per_leverage,
-        best_output_path=args.best_output,
+        jobs=args.jobs
     )

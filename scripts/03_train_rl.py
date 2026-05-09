@@ -157,7 +157,7 @@ def train_commander(
         model = PPO(
             "MlpPolicy",
             train_env,
-            verbose=1,
+            verbose=0,
             seed=seed,
             tensorboard_log=log_dir,
             **hp
@@ -186,7 +186,8 @@ def train_commander(
         model.learn(
             total_timesteps=total_timesteps,
             callback=[eval_callback, smart_stop],
-            reset_num_timesteps=False
+            reset_num_timesteps=False,
+            tb_log_name=model_tag
         )
     except KeyboardInterrupt:
         print("\\n[INFO] 사용자에 의해 학습이 강제 중단되었습니다.")
@@ -311,7 +312,7 @@ if __name__ == "__main__":
     # 4. 데이터 및 저장 경로 (신규 아키텍처 기본값)
     default_data_path = os.path.join(ROOT_DIR, "data", "signals", "base_signals_log.csv")
     default_model_dir = os.path.join(ROOT_DIR, "checkpoints", "rl_generations")
-    default_log_dir = os.path.join(ROOT_DIR, "logs", "train")
+    default_log_dir = os.environ.get("CUSTOM_LOG_DIR", os.path.join(ROOT_DIR, "logs", "train"))
     
     parser.add_argument("--data-path", type=str, default=default_data_path, help="베이스 참모진 신호 데이터 경로")
     parser.add_argument("--model-dir", type=str, default=default_model_dir, help="모델 체크포인트 저장 폴더")
