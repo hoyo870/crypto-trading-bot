@@ -114,7 +114,7 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
                     model_dir, log_dir, data_path, top_k,
                     split_mode, train_ratio, eval_ratio, train_ep_steps, eval_window,
                     eval_freq, no_improve_start_ratio,
-                    tuning_profile, tag=None):
+                    tuning_profile, tag=None, load_model=None):
     os.makedirs(log_dir, exist_ok=True)
     candidates_dir = os.path.join(model_dir, "candidates")
     _preflight_check(data_path=data_path, model_dir=model_dir)
@@ -161,6 +161,8 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
             "--model-dir", model_dir,
             "--data-path", data_path,
         ]
+        if load_model and os.path.exists(load_model):
+            cmd += ["--load-model", load_model]
         if improved_hp:
             cmd.append("--improved-hp")
 
@@ -231,6 +233,8 @@ if __name__ == "__main__":
                         choices=["stable", "balanced", "aggressive"],
                         default="balanced",
                         help="v6 튜닝 프로파일")
+    parser.add_argument("--load-model", type=str, default=None,
+                        help="파인튜닝용 초기 모델 zip 경로 (Gen1→Gen2 등)")
     args = parser.parse_args()
 
     run_train_batch(
@@ -255,4 +259,5 @@ if __name__ == "__main__":
         no_improve_start_ratio=args.no_improve_start_ratio,
         tuning_profile=args.tuning_profile,
         tag=args.tag,
+        load_model=args.load_model,
     )

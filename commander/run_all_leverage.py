@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import subprocess
 import random
 import time
@@ -15,8 +16,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PARALLEL_JOBS = 3
 
 DEFAULT_PROFILES = ("stable", "balanced", "aggressive")
-DEFAULT_LEVERAGES = (1,)
-DEFAULT_COUNT_PER_TASK = 99
+DEFAULT_LEVERAGES = (1,1,1)
+DEFAULT_COUNT_PER_TASK = 33
 
 
 def _profile_code(profile):
@@ -45,30 +46,35 @@ def _parse_csv_strs(raw):
 
 def _build_tasks(leverages, profiles, count_per_task):
     # 실행할 (count, leverage, profile) 작업 목록
-    # count_per_task=10이면 (1개 학습 + 즉시 백테스트) 작업 10개를 생성
-    # 프로파일이 초반부터 섞여 실행되도록 라운드로빈 순서로 생성
+    # count_per_task=10이면 각 (레버리지,프로파일) 조합에서 10개 모델을 학습
     tasks = []
-    for _ in range(count_per_task):
-        for lev, profile in product(leverages, profiles):
-            tasks.append((1, lev, profile))
+    for lev, profile in product(leverages, profiles):
+        tasks.append((int(count_per_task), lev, profile))
     return tasks
 
 
-def _launch_training(count, leverage, tuning_profile):
+def _launch_training(count, leverage, tuning_profile, load_model=None):
     seeds = [random.randint(0, 10000) for _ in range(count)]
-    tags = [_build_tag(leverage, tuning_profile, s) for s in seeds]
+    base_tag = _build_tag(leverage, tuning_profile, seeds[0])
+    if count == 1:
+        tags = [base_tag]
+    else:
+        tags = [f"{base_tag}_{i + 1:03d}" for i in range(count)]
     cmd = [
         sys.executable,
         os.path.join(BASE_DIR, "run_train.py"),
         "--count", str(count),
         "--leverage", str(leverage),
         "--tuning-profile", tuning_profile,
-        "--tag", tags[0],
+        "--tag", base_tag,
         "--top-k", "0",
         "--seeds", ",".join(str(s) for s in seeds),
         "--no-improve-start-ratio", "0.1",  # 학습 초반 10%는 no-improve 카운트 시작 안 함
         "--split-mode", "holdout",
     ]
+    if load_model and os.path.exists(load_model):
+        cmd += ["--load-model", load_model]
+        print(f"[INFO] 파인튜닝 모드: {os.path.basename(load_model)} → {tuning_profile}")
     return subprocess.Popen(cmd, cwd=BASE_DIR), seeds, tags
 
 
@@ -98,11 +104,27 @@ def run_parallel_trainings(parallel_jobs=DEFAULT_PARALLEL_JOBS,
                           leverages=None,
                           profiles=None,
                           count_per_task=DEFAULT_COUNT_PER_TASK,
-                          run_backtest=True):
+                          run_backtest=True,
+                          gen1_meta_path=None):
     if leverages is None:
         leverages = list(DEFAULT_LEVERAGES)
     if profiles is None:
         profiles = list(DEFAULT_PROFILES)
+
+    # Gen1 파인튜닝 모델 맵 로드
+    gen1_model_map = {}  # profile -> zip 절대 경로
+    if gen1_meta_path:
+        meta_path = os.path.abspath(gen1_meta_path)
+        if os.path.exists(meta_path):
+            meta = json.loads(open(meta_path, encoding="utf-8").read())
+            for m in meta.get("models", []):
+                zip_path = m.get("zip_path", "")
+                if not os.path.isabs(zip_path):
+                    zip_path = os.path.join(os.path.dirname(BASE_DIR), zip_path)
+                gen1_model_map[m["assigned_profile"]] = zip_path
+            print(f"[INFO] Gen1 파인튜닝 모드 활성화: {list(gen1_model_map.keys())}")
+        else:
+            print(f"[WARN] gen1_meta_path 파일 없음: {meta_path}")
 
     tasks = deque(_build_tasks(leverages=leverages,
                                profiles=profiles,
@@ -128,7 +150,8 @@ def run_parallel_trainings(parallel_jobs=DEFAULT_PARALLEL_JOBS,
             print(f"\n{'*'*50}")
             print(f"▶️ 실행 시작: 레버리지 {leverage}x | profile={profile} | 모델 {count}개")
             print(f"{'*'*50}\n")
-            proc, seeds, tags = _launch_training(count, leverage, profile)
+            load_model = gen1_model_map.get(profile)
+            proc, seeds, tags = _launch_training(count, leverage, profile, load_model=load_model)
 
             active.append((proc, count, leverage, profile, seeds, tags))
 
@@ -189,7 +212,7 @@ if __name__ == "__main__":
         "--count-per-task",
         type=int,
         default=DEFAULT_COUNT_PER_TASK,
-        help="각 (레버리지,프로파일) 조합에서 학습할 모델 수 (각 모델은 개별 프로세스로 학습 후 즉시 백테스트)"
+        help="각 (레버리지,프로파일) 조합에서 한 번의 run_train 호출로 학습할 모델 수"
     )
     parser.add_argument(
         "--run-backtest",
@@ -204,6 +227,12 @@ if __name__ == "__main__":
         help="개별 학습 완료 직후 run_backtest.py 자동 실행 비활성화"
     )
     parser.set_defaults(run_backtest=True)
+    parser.add_argument(
+        "--gen1-meta",
+        type=str,
+        default=None,
+        help="Gen1 메타 JSON 경로. 지정 시 프로파일별 Gen1 모델을 초기 가중치로 파인튜닝"
+    )
     args = parser.parse_args()
 
     profiles = _parse_csv_strs(args.profiles)
@@ -218,4 +247,5 @@ if __name__ == "__main__":
         profiles=profiles,
         count_per_task=max(1, int(args.count_per_task)),
         run_backtest=args.run_backtest,
+        gen1_meta_path=args.gen1_meta,
     )
