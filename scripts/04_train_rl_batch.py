@@ -13,11 +13,24 @@ import argparse
 import subprocess
 from collections import deque
 from itertools import product
+import logging
 
 # ── 경로 설정 ─────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
 TRAIN_SCRIPT = os.path.join(SCRIPT_DIR, "03_train_rl.py")
+
+# ── 로깅 설정 ─────────────────────────────────────────────────────────────
+os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(ROOT_DIR, "logs", "orchestrator.log"), encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("Batch")
 
 
 def run_parallel_orchestrator(args):
@@ -29,11 +42,11 @@ def run_parallel_orchestrator(args):
     total_tasks = len(tasks)
     active_procs = []
     
-    print(f"\n{'='*65}")
-    print(f"🚀 [M1 Max 병렬 훈련 사령탑 가동]")
-    print(f"총 {total_tasks}개의 훈련 그룹이 큐(Queue)에 등록되었습니다.")
-    print(f"그룹당 시드(모델) 수: {args.count_per_task}개 | 동시 실행(코어) 수: {args.jobs}개")
-    print(f"{'='*65}\n")
+    logger.info(f"\n{'='*65}")
+    logger.info(f"🚀 [M1 Max 병렬 훈련 사령탑 가동]")
+    logger.info(f"총 {total_tasks}개의 훈련 그룹이 큐(Queue)에 등록되었습니다.")
+    logger.info(f"그룹당 시드(모델) 수: {args.count_per_task}개 | 동시 실행(코어) 수: {args.jobs}개")
+    logger.info(f"{'='*65}\n")
     
     start_time = time.time()
     completed_tasks = 0
@@ -58,7 +71,7 @@ def run_parallel_orchestrator(args):
             if args.load_model:
                 cmd.extend(["--load-model", args.load_model])
                 
-            print(f"▶️ [START] 레버리지: {lev}x | 프로파일: {prof:<10} | 시드 투입: {args.count_per_task}개")
+            logger.info(f"▶️ [START] 레버리지: {lev}x | 프로파일: {prof:<10} | 시드 투입: {args.count_per_task}개")
             
             # 환경변수 상속 및 프로세스 실행
             env_vars = os.environ.copy()
@@ -66,9 +79,8 @@ def run_parallel_orchestrator(args):
             
             proc = subprocess.Popen(cmd, 
                 env=env_vars, 
-                cwd=ROOT_DIR,
-                stdout=subprocess.DEVNULL, # 👈 로그 출력 숨김
-                # stderr=subprocess.DEVNULL  # 👈 에러 출력 숨김
+                cwd=ROOT_DIR
+                # stdout/stderr 를 숨기지 않음으로써 03_train_rl.py의 로깅이 화면에 나오게 함
             )
             active_procs.append((proc, lev, prof))
         
@@ -82,12 +94,12 @@ def run_parallel_orchestrator(args):
                 
                 # 에러 발생 시 즉시 중단 안전장치
                 if ret != 0:
-                    print(f"\n[ERROR] ❌ {lev}x ({prof}) 훈련 그룹에서 치명적 에러 발생! (Exit code: {ret})")
+                    logger.error(f"\n[ERROR] ❌ {lev}x ({prof}) 훈련 그룹에서 치명적 에러 발생! (Exit code: {ret})")
                     for p, _, _ in active_procs:
                         p.terminate()
                     sys.exit(ret)
                 else:
-                    print(f"✅ [DONE] 레버리지: {lev}x | 프로파일: {prof:<10} (완료: {completed_tasks}/{total_tasks})")
+                    logger.info(f"✅ [DONE] 레버리지: {lev}x | 프로파일: {prof:<10} (완료: {completed_tasks}/{total_tasks})")
         
         time.sleep(1) 
 
@@ -95,10 +107,10 @@ def run_parallel_orchestrator(args):
     hours, rem = divmod(total_elapsed, 3600)
     mins, secs = divmod(rem, 60)
     
-    print(f"\n{'='*65}")
-    print(f"🎉 훈련 배치가 모두 종료되었습니다!")
-    print(f"⏱️ 총 소요 시간: {int(hours)}시간 {int(mins)}분 {int(secs)}초")
-    print(f"{'='*65}\n")
+    logger.info(f"\n{'='*65}")
+    logger.info(f"🎉 훈련 배치가 모두 종료되었습니다!")
+    logger.info(f"⏱️ 배치 단위 총 소요 시간: {int(hours)}시간 {int(mins)}분 {int(secs)}초")
+    logger.info(f"{'='*65}\n")
 
 
 if __name__ == "__main__":

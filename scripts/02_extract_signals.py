@@ -4,9 +4,12 @@ import numpy as np
 import pandas as pd
 import talib
 import argparse
+import sys
 from torch.utils.data import Dataset, DataLoader
 import time
 import warnings
+import logging
+
 warnings.filterwarnings('ignore')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,6 +18,18 @@ if ROOT_DIR not in os.sys.path:
     os.sys.path.insert(0, ROOT_DIR)
 
 from src.models.base_models import PriceActionExpert, ContextExpert
+
+# ── 로깅 설정 ─────────────────────────────────────────────────────────────
+os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(ROOT_DIR, "logs", "orchestrator.log"), encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("ExtractSignals")
 
 DEFAULT_THRESHOLD_SETS = [
     ("conservative", 0.68, 0.22, 0.50, 0.03),
@@ -40,7 +55,7 @@ def _print_period_summary(results_df):
     tmp = tmp.dropna(subset=['datetime'])
 
     if tmp.empty:
-        print("\n[연/분기 리포트] datetime 파싱 실패로 생성할 수 없습니다.")
+        logger.warning("\n[연/분기 리포트] datetime 파싱 실패로 생성할 수 없습니다.")
         return
 
     tmp['year'] = tmp['datetime'].dt.year.astype(int)
@@ -58,10 +73,8 @@ def _print_period_summary(results_df):
         .round(4)
     )
 
-    print("\n[연도별 점수 통계]")
-    print(year_stats)
-    print("\n[분기별 점수 통계]")
-    print(quarter_stats)
+    logger.info(f"\n[연도별 점수 통계]\n{year_stats}")
+    logger.info(f"\n[분기별 점수 통계]\n{quarter_stats}")
 
 
 def _scan_threshold_sets(results_df, threshold_sets):
@@ -133,7 +146,7 @@ def _parse_threshold_sets(raw):
 def extract_base_signals(data_path, seq_length=120, batch_size=512,
                          threshold_sets=None, output_filename="base_signals_log.csv"):
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    print(f"[INFO] 테스트 데이터를 위한 전체 시계열 로딩 중...")
+    logger.info(f"[INFO] 테스트 데이터를 위한 전체 시계열 로딩 중...")
 
     # 1. 데이터 로드 및 피처 생성 (다운샘플링 X)
     df = pd.read_csv(data_path)
@@ -198,7 +211,7 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     test_close = raw_close[val_end:]
     test_dates = raw_dates[val_end:]
 
-    print(f"[INFO] 3개의 전문가 모델 로딩 중...")
+    logger.info(f"[INFO] 3개의 전문가 모델 로딩 중...")
     model_dir = os.path.join(ROOT_DIR, "checkpoints", "base_experts")
 
     long_model = PriceActionExpert().to(device)
@@ -213,7 +226,7 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     context_model.load_state_dict(torch.load(os.path.join(model_dir, "context_expert.pth"), map_location=device))
     context_model.eval()
 
-    print(f"[INFO] 배치 추론 시작...")
+    logger.info(f"[INFO] 배치 추론 시작...")
     pv_dataset = SlidingWindowDataset(test_pv_features, seq_length)
     ctx_dataset = SlidingWindowDataset(test_ctx_features, seq_length)
     
@@ -231,7 +244,7 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
             short_scores.extend(short_model(pv_batch).cpu().numpy())
             context_scores.extend(context_model(ctx_batch).cpu().numpy())
 
-    print(f"[INFO] 추론 완료 ({time.time() - t0:.1f}초)")
+    logger.info(f"[INFO] 추론 완료 ({time.time() - t0:.1f}초)")
 
     # 결과 저장
     results_df = pd.DataFrame({
@@ -246,11 +259,10 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, output_filename)
     results_df.to_csv(out_path, index=False)
-    print(f"✅ 1, 2차 모델 점수 로그가 저장되었습니다: {out_path}")
+    logger.info(f"✅ 1, 2차 모델 점수 로그가 저장되었습니다: {out_path}")
     
     # 간략한 분포 리포트
-    print("\n[점수 분포 요약]")
-    print(results_df[['long_score', 'short_score', 'context_score']].describe())
+    logger.info(f"\n[점수 분포 요약]\n{results_df[['long_score', 'short_score', 'context_score']].describe()}")
 
     _print_period_summary(results_df)
 
@@ -258,12 +270,11 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
         threshold_sets = DEFAULT_THRESHOLD_SETS
     scan_df = _scan_threshold_sets(results_df, threshold_sets)
     if not scan_df.empty:
-        print("\n[임계치 세트 재검증]")
-        print(scan_df.to_string(index=False))
+        logger.info(f"\n[임계치 세트 재검증]\n{scan_df.to_string(index=False)}")
 
         scan_path = os.path.join(output_dir, "base_signals_threshold_scan.csv")
         scan_df.to_csv(scan_path, index=False)
-        print(f"[INFO] 임계치 재검증 결과 저장: {scan_path}")
+        logger.info(f"[INFO] 임계치 재검증 결과 저장: {scan_path}")
 
         by_year_rows = []
         tmp = results_df.copy()
@@ -279,11 +290,10 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
                 by_year_rows.append(y_scan)
             if by_year_rows:
                 by_year_df = pd.concat(by_year_rows, ignore_index=True)
-                print("\n[임계치 세트 재검증 - 연도별]")
-                print(by_year_df.to_string(index=False))
+                logger.info(f"\n[임계치 세트 재검증 - 연도별]\n{by_year_df.to_string(index=False)}")
                 by_year_path = os.path.join(output_dir, "base_signals_threshold_scan_by_year.csv")
                 by_year_df.to_csv(by_year_path, index=False)
-                print(f"[INFO] 연도별 임계치 재검증 결과 저장: {by_year_path}")
+                logger.info(f"[INFO] 연도별 임계치 재검증 결과 저장: {by_year_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Base 신호 검증 및 통계 리포트")
@@ -310,7 +320,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if not os.path.exists(os.path.join(ROOT_DIR, "checkpoints", "base_experts", "long_expert.pth")):
-        print("[ERROR] Base 모델이 없습니다. 'python train_base_models.py'를 먼저 실행하세요.")
+        logger.error("[ERROR] Base 모델이 없습니다. 'python train_base_models.py'를 먼저 실행하세요.")
     else:
         extract_base_signals(
             data_path=args.data_path,

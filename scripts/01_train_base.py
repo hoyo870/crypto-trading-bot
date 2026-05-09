@@ -1,10 +1,12 @@
 import os
+import time
 import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import f1_score, accuracy_score
 from copy import deepcopy
+import logging
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -16,11 +18,24 @@ if ROOT_DIR not in os.sys.path:
 
 from src.models.base_models import PriceActionExpert, ContextExpert, prepare_expert_data
 
+# ── 로깅 설정 ─────────────────────────────────────────────────────────────
+os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(ROOT_DIR, "logs", "orchestrator.log"), encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("TrainBase")
+
 def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
+    start_time = time.time()
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    print(f"\n{'='*50}")
-    print(f"🚀 [{expert_type.upper()} EXPERT] 모델 훈련 시작 (Device: {device})")
-    print(f"{'='*50}")
+    logger.info(f"\n{'='*50}")
+    logger.info(f"🚀 [{expert_type.upper()} EXPERT] 모델 훈련 시작 (Device: {device})")
+    logger.info(f"{'='*50}")
 
     # 데이터 로드 (다운샘플링 적용됨)
     train_loader, val_loader, test_loader, input_dim = prepare_expert_data(data_path, expert_type, seq_length)
@@ -75,7 +90,7 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
         val_f1 = f1_score(val_trues, val_preds, zero_division=0)
         val_acc = accuracy_score(val_trues, val_preds)
         
-        print(f"Epoch [{epoch+1:03d}/{epochs}] | Loss: {train_loss/len(train_loader):.4f} | Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f}")
+        logger.info(f"Epoch [{epoch+1:03d}/{epochs}] | Loss: {train_loss/len(train_loader):.4f} | Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f}")
 
         scheduler.step(val_f1)
 
@@ -86,7 +101,7 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print(f"[INFO] 조기 종료 발동 ({patience} epochs 개선 없음).")
+                logger.info(f"[INFO] 조기 종료 발동 ({patience} epochs 개선 없음).")
                 break
 
     # 최고 모델 저장
@@ -95,16 +110,18 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     save_path = os.path.join(model_dir, f"{expert_type}_expert.pth")
     if best_model_weights is not None:
         torch.save(best_model_weights, save_path)
-    print(f"✅ [{expert_type.upper()}] 훈련 완료 및 저장 (Best F1: {best_val_f1:.4f}) -> {save_path}")
+        
+    elapsed = time.time() - start_time
+    logger.info(f"✅ [{expert_type.upper()}] 훈련 완료 및 저장 (Best F1: {best_val_f1:.4f}, 소요시간: {int(elapsed//60)}분 {int(elapsed%60)}초) -> {save_path}")
 
 
 if __name__ == "__main__":
     data_path = os.path.join(ROOT_DIR, "data", "BTC_USDT_processed.csv")
     if not os.path.exists(data_path):
-        print("[ERROR] 데이터 파일을 찾을 수 없습니다.")
+        logger.error("[ERROR] 데이터 파일을 찾을 수 없습니다.")
     else:
         # 3명의 전문가를 순차적으로 훈련
         train_expert('long', data_path, seq_length=120)
         train_expert('short', data_path, seq_length=120)
         train_expert('context', data_path, seq_length=120)
-        print("\n🎉 모든 Base 전문가 모델 훈련이 완료되었습니다!")
+        logger.info("\n🎉 모든 Base 전문가 모델 훈련이 완료되었습니다!")

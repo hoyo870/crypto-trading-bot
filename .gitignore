@@ -40,6 +40,7 @@ reports/
 
 # 강화학습 진화 파이프라인에서 생성되는 수많은 zip 가중치는 Git 용량 초과를 유발하므로 무시
 checkpoints/rl_generations/**/*.zip
+checkpoints/rl_generations/**/*.npz
 
 # 💡 [예외 처리] 단, 매 세대의 최종 우승자(best_gen.zip)는 Git에 올려서 보존하고 싶다면 아래 주석을 해제하세요!
 !checkpoints/rl_generations/**/best_gen*.zip

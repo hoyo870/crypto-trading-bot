@@ -14,6 +14,7 @@ import traceback
 from datetime import datetime
 import numpy as np
 import pandas as pd
+import logging
 
 # 멀티프로세싱 중 차트 충돌(GUI 에러) 방지를 위한 Agg 백엔드 강제
 import matplotlib
@@ -35,6 +36,18 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from src.envs.trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
+
+# ── 로깅 설정 ─────────────────────────────────────────────────────────────
+os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(ROOT_DIR, "logs", "orchestrator.log"), encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("Backtest")
 
 
 # ── 유틸리티 함수 ─────────────────────────────────────────────────────────
@@ -188,9 +201,9 @@ def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
     results = []
     total = len(tags)
     
-    print(f"\n{'='*70}")
-    print(f"🚀 총 {total}개 모델 병렬 일괄 백테스트 가동 시작 (코어: {jobs}개)")
-    print(f"{'='*70}")
+    logger.info(f"\n{'='*70}")
+    logger.info(f"🚀 총 {total}개 모델 병렬 일괄 백테스트 가동 시작 (코어: {jobs}개)")
+    logger.info(f"{'='*70}")
 
     # M1 Max 코어를 100% 활용하는 ProcessPoolExecutor
     with ProcessPoolExecutor(max_workers=jobs) as executor:
@@ -205,10 +218,10 @@ def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
             completed += 1
             
             if err:
-                print(f"[{completed:03d}/{total}] ❌ 실패: {tag} ({err})")
+                logger.error(f"[{completed:03d}/{total}] ❌ 실패: {tag} ({err})")
             else:
                 status = "⚠️ 청산" if summary["liquidated"] else "✅ 완료"
-                print(f"[{completed:03d}/{total}] {status}: {tag} (Lev: {lev}x) => 수익률: {summary.get('total_return_pct', 0):+7.2f}% | MDD: {summary.get('mdd_pct', 0):5.2f}%")
+                logger.info(f"[{completed:03d}/{total}] {status}: {tag} (Lev: {lev}x) => 수익률: {summary.get('total_return_pct', 0):+7.2f}% | MDD: {summary.get('mdd_pct', 0):5.2f}%")
                 results.append({"tag": tag, "leverage": lev, "summary": summary})
 
     # ── 레버리지별 베스트 모델 산출 ──
@@ -218,9 +231,9 @@ def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
             grouped.setdefault(r["leverage"], []).append(r)
 
         best_lines = ["leverage,tag,metric,metric_value,total_return_pct,mdd_pct,sharpe_ratio,liquidated"]
-        print(f"\n{'='*70}")
-        print(f"🏆 레버리지별 베스트 모델 (기준: {best_metric})")
-        print(f"{'='*70}")
+        logger.info(f"\n{'='*70}")
+        logger.info(f"🏆 레버리지별 베스트 모델 (기준: {best_metric})")
+        logger.info(f"{'='*70}")
         
         for lev in sorted(grouped.keys()):
             candidates = grouped[lev]
@@ -232,13 +245,13 @@ def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
                     f"{s.get('sharpe_ratio', 0.0):.6f},{s.get('liquidated', False)}")
             best_lines.append(line)
             
-            print(f"[Lev {lev}x] 1등: {best['tag']}")
-            print(f"   => 수익률: {s.get('total_return_pct'):+.2f}% | MDD: {s.get('mdd_pct'):.2f}% | 승률: {s.get('win_rate'):.1f}%\n")
+            logger.info(f"[Lev {lev}x] 1등: {best['tag']}")
+            logger.info(f"   => 수익률: {s.get('total_return_pct'):+.2f}% | MDD: {s.get('mdd_pct'):.2f}% | 승률: {s.get('win_rate'):.1f}%\n")
 
         best_output_path = os.path.join(reports_dir, "best_by_leverage.csv")
         with open(best_output_path, "w", encoding="utf-8") as f:
             f.write("\n".join(best_lines) + "\n")
-        print(f"💾 베스트 결과 저장 완료: {best_output_path}\n")
+        logger.info(f"💾 베스트 결과 저장 완료: {best_output_path}\n")
 
 
 def _auto_discover_tags(model_dir):
@@ -282,7 +295,7 @@ if __name__ == "__main__":
     else:
         tags = _auto_discover_tags(args.model_dir)
         if not tags:
-            print(f"[ERROR] '{args.model_dir}' 경로에서 백테스트 가능한 모델을 찾을 수 없습니다.")
+            logger.error(f"[ERROR] '{args.model_dir}' 경로에서 백테스트 가능한 모델을 찾을 수 없습니다.")
             sys.exit(1)
 
     run_backtest_all(

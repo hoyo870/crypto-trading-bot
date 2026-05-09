@@ -15,6 +15,7 @@ import gc
 from datetime import datetime
 import numpy as np
 import pandas as pd
+import logging
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
@@ -24,6 +25,18 @@ from stable_baselines3.common.monitor import Monitor
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))      # scripts/
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)                       # 프로젝트 루트
 SRC_DIR = os.path.join(ROOT_DIR, "src")                     # 소스 코드 디렉토리
+
+# ── 로깅 설정 ─────────────────────────────────────────────────────────────
+os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(ROOT_DIR, "logs", "orchestrator.log"), encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("Commander.Train")
 
 # 환경(Env) 및 모델(Models) 임포트를 위해 src 경로 추가
 if ROOT_DIR not in sys.path:
@@ -83,7 +96,7 @@ class SmartStopCallback(BaseCallback):
         entropy = self.logger.name_to_value.get("train/entropy_loss", None)
         if entropy is not None and entropy > self.entropy_threshold:
             if self.verbose:
-                print(f"\n[SmartStop] 정책 퇴화 감지: entropy_loss={entropy:.6f} → 종료")
+                logger.info(f"[SmartStop] 정책 퇴화 감지: entropy_loss={entropy:.6f} → 종료")
             return False
 
         if self.n_calls % self.eval_freq != 0:
@@ -97,24 +110,26 @@ class SmartStopCallback(BaseCallback):
             self._best_reward = current_best
             self._no_improve_count = 0
             if self.verbose:
-                print(f"[SmartStop] 개선됨: best_reward={self._best_reward:.2f}")
+                logger.debug(f"[SmartStop] 개선됨: best_reward={self._best_reward:.2f}")
+                pass
         else:
             if self.n_calls < self.no_improve_check_start_step:
                 if self.verbose:
-                    print(f"[SmartStop] 워밍업 구간: no-improve 체크 보류 ({self.n_calls}/{self.no_improve_check_start_step} steps)")
+                    logger.debug(f"[SmartStop] 워밍업 구간: no-improve 체크 보류 ({self.n_calls}/{self.no_improve_check_start_step} steps)")
+                    pass
                 return True
             self._no_improve_count += 1
             if self.verbose:
-                print(f"[SmartStop] 개선 없음 {self._no_improve_count}/{self.patience} (best={self._best_reward:.2f})")
+                logger.debug(f"[SmartStop] 개선 없음 {self._no_improve_count}/{self.patience} (best={self._best_reward:.2f})")
 
         if self._no_improve_count >= self.patience:
             if self.verbose:
-                print(f"\n[SmartStop] Early Stopping (best={self._best_reward:.2f})")
+                logger.info(f"[SmartStop] Early Stopping (best={self._best_reward:.2f})")
             return False
 
         if self.reward_target is not None and self._best_reward >= self.reward_target:
             if self.verbose:
-                print(f"\n[SmartStop] 목표 달성! eval reward={self._best_reward:.2f}")
+                logger.info(f"[SmartStop] 목표 달성! eval reward={self._best_reward:.2f}")
                 return False
 
         return True
@@ -127,9 +142,9 @@ def train_commander(
     improved_hp, split_mode, train_ratio, eval_ratio, train_ep_steps,
     eval_window, data_path, model_dir, log_dir, tuning_profile
 ):
-    print(f"\\n{'='*60}")
-    print(f"🚀 Commander RL 훈련 시작 (레버리지 {leverage}x, Seed: {seed})")
-    print(f"{'='*60}")
+    start_time = time.time()
+    
+    logger.debug(f"🚀 Commander RL 훈련 시작 (레버리지 {leverage}x, Seed: {seed})")
 
     # 환경 생성 (Train / Eval) - 향후 holdout 분할 등을 env 내부에서 처리한다고 가정
     train_env = LeverageTradingEnv(data_path=data_path, leverage=leverage, mode="train")
@@ -142,7 +157,7 @@ def train_commander(
     hp = PPO_TUNING_PROFILES.get(tuning_profile, PPO_TUNING_PROFILES["balanced"])
 
     if load_model_path and os.path.exists(load_model_path):
-        print(f"[INFO] 기존 부모 모델 로드 중: {load_model_path}")
+        logger.debug(f"[INFO] 기존 부모 모델 로드 중: {load_model_path}")
         # 세대 진화 (Gen2, Gen3...) 시 탐험심 주입
         custom_objects = {"ent_coef": hp["ent_coef"], "learning_rate": hp["learning_rate"]}
         model = PPO.load(
@@ -153,7 +168,7 @@ def train_commander(
             tensorboard_log=log_dir
         )
     else:
-        print(f"[INFO] 백지 상태(Random Weights)에서 훈련 시작")
+        logger.debug(f"[INFO] 백지 상태(Random Weights)에서 훈련 시작")
         model = PPO(
             "MlpPolicy",
             train_env,
@@ -190,18 +205,18 @@ def train_commander(
             tb_log_name=model_tag
         )
     except KeyboardInterrupt:
-        print("\\n[INFO] 사용자에 의해 학습이 강제 중단되었습니다.")
+        logger.warning("[INFO] 사용자에 의해 학습이 강제 중단되었습니다.")
     finally:
         # 최종 모델 저장 (가장 좋았던 모델은 EvalCallback이 이미 저장함)
         os.makedirs(os.path.join(model_dir, model_tag), exist_ok=True)  # 디렉터리 보장
         final_path = os.path.join(model_dir, model_tag, f"final_model_{model_tag}.zip")
         model.save(final_path)
-        print(f"✅ 훈련 종료! 최종 모델 저장됨: {final_path}")
         
         # 메모리 누수 방지
         del model, train_env, eval_env
         gc.collect()
 
+    return start_time
 
 # ── 배치 실행 헬퍼 ─────────────────────────────────────────────────────────
 def _next_tag(model_dir, leverage, seed, tuning_profile):
@@ -235,11 +250,9 @@ def run_train_batch(args):
     else:
         seeds = [args.base_seed + i * args.seed_step for i in range(args.count)]
 
-    start_time = time.time()
+    batch_start_time = time.time()
     
     for i, seed in enumerate(seeds):
-        print(f"\\n[BATCH] 진행 상황: {i+1} / {len(seeds)} (현재 시드: {seed})")
-        
         # 저장 폴더 태그 생성
         if args.tag and len(seeds) == 1:
             tag = str(args.tag)
@@ -248,7 +261,7 @@ def run_train_batch(args):
         else:
             tag = _next_tag(args.model_dir, args.leverage, seed, args.tuning_profile)
         
-        train_commander(
+        indiv_start = train_commander(
             total_timesteps=args.timesteps,
             eval_freq=args.eval_freq,
             patience=args.patience,
@@ -271,16 +284,12 @@ def run_train_batch(args):
             tuning_profile=args.tuning_profile
         )
 
-    if args.top_k > 0:
-        print(f"[INFO] --top-k={args.top_k} 는 통합 스크립트에서 아직 미사용입니다. (호환 인자로만 수용)")
+        indiv_elapsed = time.time() - indiv_start
+        total_elapsed = time.time() - batch_start_time
+        logger.info(f"🔄 [Lev {args.leverage}x | {args.tuning_profile:<10}] 완료: [{i+1:03d}/{len(seeds):03d}] (Seed: {seed}, 개별 소요시간: {int(indiv_elapsed//60)}분, 누적시간: {int(total_elapsed//60)}분)")
 
-    elapsed = time.time() - start_time
-    hours, rem = divmod(elapsed, 3600)
-    mins, secs = divmod(rem, 60)
-    print(f"\\n{'='*60}")
-    print(f"🎉 일괄 훈련 배치가 모두 종료되었습니다!")
-    print(f"⏱️ 총 소요 시간: {int(hours)}시간 {int(mins)}분 {int(secs)}초")
-    print(f"{'='*60}\\n")
+    if args.top_k > 0:
+        logger.info(f"[INFO] --top-k={args.top_k} 는 통합 스크립트에서 아직 미사용입니다. (호환 인자로만 수용)")
 
 
 # ── 메인 진입점 (Argparse 통합) ───────────────────────────────────────────
