@@ -6,9 +6,10 @@ joblib>=1.1.0
 matplotlib>=3.5.0
 
 # Technical Indicators
-# Note: TA-Lib requires the underlying C library to be installed on your OS.
-# If installation fails, try: pip install TA-Lib-binary (Windows) or install the C lib first.
-TA-Lib>=0.4.24
+# Windows: use prebuilt wheel package.
+TA-Lib-binary>=0.4.24; platform_system == "Windows"
+# macOS/Linux: use official package (may require system TA-Lib C library).
+TA-Lib>=0.4.24; platform_system != "Windows"
 
 # Cryptocurrency Exchange API
 ccxt>=3.0.0
