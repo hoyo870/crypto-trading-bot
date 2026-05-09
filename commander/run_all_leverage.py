@@ -17,7 +17,7 @@ DEFAULT_PARALLEL_JOBS = 3
 
 DEFAULT_PROFILES = ("stable", "balanced", "aggressive")
 DEFAULT_LEVERAGES = (1,1,1)
-DEFAULT_COUNT_PER_TASK = 33
+DEFAULT_COUNT_PER_TASK = 3
 
 
 def _profile_code(profile):
