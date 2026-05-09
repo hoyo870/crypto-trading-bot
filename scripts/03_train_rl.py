@@ -203,15 +203,23 @@ def train_commander(
 
 
 # ── 배치 실행 헬퍼 ─────────────────────────────────────────────────────────
-def _next_tag(model_dir, leverage, seed):
+def _next_tag(model_dir, leverage, seed, tuning_profile):
+    """지저분한 난수/시간을 제거하고 깔끔한 순차 태그를 생성합니다."""
     os.makedirs(model_dir, exist_ok=True)
-    prefix = f"lev{int(leverage)}_seed{int(seed)}"
+    
+    # 프로파일 약어 매핑
+    prof_code = {"stable": "stb", "balanced": "bal", "aggressive": "agg"}.get(tuning_profile, "unk")
+    
+    prefix = f"lev{int(leverage)}_{prof_code}_seed{int(seed)}"
     max_idx = 0
+    
     for folder in os.listdir(model_dir):
         if folder.startswith(prefix + "_"):
             suffix = folder[len(prefix) + 1:]
+            # 뒤에 붙은 숫자가 3자리인지 확인 (_001, _002 ...)
             if suffix.isdigit() and len(suffix) == 3:
                 max_idx = max(max_idx, int(suffix))
+                
     return f"{prefix}_{max_idx + 1:03d}"
 
 def run_train_batch(args):
@@ -237,7 +245,7 @@ def run_train_batch(args):
         elif args.tag and len(seeds) > 1:
             tag = f"{str(args.tag)}_{i + 1:03d}"
         else:
-            tag = _next_tag(args.model_dir, args.leverage, seed)
+            tag = _next_tag(args.model_dir, args.leverage, seed, args.tuning_profile)
         
         train_commander(
             total_timesteps=args.timesteps,
