@@ -42,7 +42,8 @@ def run_parallel_orchestrator(args):
     total_tasks = len(tasks)
     active_procs = []
     
-    logger.info(f"\n{'='*65}")
+    logger.info("")
+    logger.info(f"{'='*65}")
     logger.info(f"🚀 [M1 Max 병렬 훈련 사령탑 가동]")
     logger.info(f"총 {total_tasks}개의 훈련 그룹이 큐(Queue)에 등록되었습니다.")
     logger.info(f"그룹당 시드(모델) 수: {args.count_per_task}개 | 동시 실행(코어) 수: {args.jobs}개")
@@ -79,8 +80,9 @@ def run_parallel_orchestrator(args):
             
             proc = subprocess.Popen(cmd, 
                 env=env_vars, 
-                cwd=ROOT_DIR
-                # stdout/stderr 를 숨기지 않음으로써 03_train_rl.py의 로깅이 화면에 나오게 함
+                cwd=ROOT_DIR,
+                # stdout=subprocess.DEVNULL, # 👈 로그 출력 숨김
+                stderr=subprocess.DEVNULL  # 👈 에러 출력 숨김
             )
             active_procs.append((proc, lev, prof))
         
@@ -107,7 +109,8 @@ def run_parallel_orchestrator(args):
     hours, rem = divmod(total_elapsed, 3600)
     mins, secs = divmod(rem, 60)
     
-    logger.info(f"\n{'='*65}")
+    logger.info("")
+    logger.info(f"{'='*65}")
     logger.info(f"🎉 훈련 배치가 모두 종료되었습니다!")
     logger.info(f"⏱️ 배치 단위 총 소요 시간: {int(hours)}시간 {int(mins)}분 {int(secs)}초")
     logger.info(f"{'='*65}\n")

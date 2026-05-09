@@ -33,7 +33,8 @@ logger = logging.getLogger("TrainBase")
 def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     start_time = time.time()
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    logger.info(f"\n{'='*50}")
+    logger.info("")
+    logger.info(f"{'='*50}")
     logger.info(f"🚀 [{expert_type.upper()} EXPERT] 모델 훈련 시작 (Device: {device})")
     logger.info(f"{'='*50}")
 

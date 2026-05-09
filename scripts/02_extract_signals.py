@@ -73,8 +73,10 @@ def _print_period_summary(results_df):
         .round(4)
     )
 
-    logger.info(f"\n[연도별 점수 통계]\n{year_stats}")
-    logger.info(f"\n[분기별 점수 통계]\n{quarter_stats}")
+    logger.info("")
+    logger.info(f"[연도별 점수 통계]\n{year_stats}")
+    logger.info("")
+    logger.info(f"[분기별 점수 통계]\n{quarter_stats}")
 
 
 def _scan_threshold_sets(results_df, threshold_sets):
@@ -262,7 +264,8 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     logger.info(f"✅ 1, 2차 모델 점수 로그가 저장되었습니다: {out_path}")
     
     # 간략한 분포 리포트
-    logger.info(f"\n[점수 분포 요약]\n{results_df[['long_score', 'short_score', 'context_score']].describe()}")
+    logger.info("")
+    logger.info(f"[점수 분포 요약]\n{results_df[['long_score', 'short_score', 'context_score']].describe()}")
 
     _print_period_summary(results_df)
 
@@ -270,7 +273,8 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
         threshold_sets = DEFAULT_THRESHOLD_SETS
     scan_df = _scan_threshold_sets(results_df, threshold_sets)
     if not scan_df.empty:
-        logger.info(f"\n[임계치 세트 재검증]\n{scan_df.to_string(index=False)}")
+        logger.info("")
+        logger.info(f"[임계치 세트 재검증]\n{scan_df.to_string(index=False)}")
 
         scan_path = os.path.join(output_dir, "base_signals_threshold_scan.csv")
         scan_df.to_csv(scan_path, index=False)
@@ -290,7 +294,8 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
                 by_year_rows.append(y_scan)
             if by_year_rows:
                 by_year_df = pd.concat(by_year_rows, ignore_index=True)
-                logger.info(f"\n[임계치 세트 재검증 - 연도별]\n{by_year_df.to_string(index=False)}")
+                logger.info("")
+                logger.info(f"[임계치 세트 재검증 - 연도별]\n{by_year_df.to_string(index=False)}")
                 by_year_path = os.path.join(output_dir, "base_signals_threshold_scan_by_year.csv")
                 by_year_df.to_csv(by_year_path, index=False)
                 logger.info(f"[INFO] 연도별 임계치 재검증 결과 저장: {by_year_path}")

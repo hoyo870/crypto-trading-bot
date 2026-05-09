@@ -61,7 +61,8 @@ def auto_discard_models(reports_dir, model_dir, log_dir, keep_top_k):
     survivors = df.head(keep_top_k)["tag"].tolist()
     best_model_tag = survivors[0] if survivors else None
     
-    logger.info(f"\n🧹 [자동 폐기 가동] 생존자 탑 {keep_top_k}명: {survivors}")
+    logger.info("")
+    logger.info(f"🧹 [자동 폐기 가동] 생존자 탑 {keep_top_k}명: {survivors}")
     
     deleted_count = 0
     for item in os.listdir(model_dir):
@@ -103,7 +104,8 @@ def run_evolution_pipeline(args):
     start_gen = current_gen
     end_gen = start_gen + args.target_generations - 1
 
-    logger.info(f"\n{'='*70}")
+    logger.info("")
+    logger.info(f"{'='*70}")
     logger.info(f"🧬 [마법의 진화 파이프라인 가동] 목표: {start_gen}세대 ➡️ {end_gen}세대")
     logger.info(f"{'='*70}")
 
@@ -120,7 +122,8 @@ def run_evolution_pipeline(args):
         os.makedirs(gen_reports_dir, exist_ok=True)
         os.makedirs(gen_logs_dir, exist_ok=True)
         
-        logger.info(f"\n🌱 [시작] {gen_str} 세대 배양을 시작합니다...")
+        logger.info("")
+        logger.info(f"🌱 [시작] {gen_str} 세대 배양을 시작합니다...")
         
         # --- [Phase 1: 병렬 훈련 가동] ---
         train_cmd = [
@@ -143,7 +146,8 @@ def run_evolution_pipeline(args):
         subprocess.run(train_cmd, env=env_vars, cwd=ROOT_DIR)
         
         # --- [Phase 2: 백테스트 및 평가] ---
-        logger.info(f"\n📊 [{gen_str}] 훈련 완료. 전체 백테스트 및 성적표 산출 중...")
+        logger.info("")
+        logger.info(f"📊 [{gen_str}] 훈련 완료. 전체 백테스트 및 성적표 산출 중...")
         bt_cmd = [
             sys.executable, BACKTEST_SCRIPT,
             "--model-dir", gen_model_dir,
@@ -182,7 +186,8 @@ def run_evolution_pipeline(args):
 
     total_elapsed = time.time() - pipeline_start_time
     hours, rem = divmod(total_elapsed, 3600)
-    logger.info(f"\n{'='*70}")
+    logger.info("")
+    logger.info(f"{'='*70}")
     logger.info(f"🎉 모든 진화 과정이 완료되었습니다! (총 소요 시간: {int(hours)}시간 {int(rem//60)}분)")
     logger.info(f"최종 우승 모델을 {gen_reports_dir} 에서 확인하세요.")
     logger.info(f"{'='*70}")

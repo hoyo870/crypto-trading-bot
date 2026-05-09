@@ -201,7 +201,8 @@ def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
     results = []
     total = len(tags)
     
-    logger.info(f"\n{'='*70}")
+    logger.info("")
+    logger.info(f"{'='*70}")
     logger.info(f"🚀 총 {total}개 모델 병렬 일괄 백테스트 가동 시작 (코어: {jobs}개)")
     logger.info(f"{'='*70}")
 
@@ -231,7 +232,8 @@ def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
             grouped.setdefault(r["leverage"], []).append(r)
 
         best_lines = ["leverage,tag,metric,metric_value,total_return_pct,mdd_pct,sharpe_ratio,liquidated"]
-        logger.info(f"\n{'='*70}")
+        logger.info("")
+        logger.info(f"{'='*70}")
         logger.info(f"🏆 레버리지별 베스트 모델 (기준: {best_metric})")
         logger.info(f"{'='*70}")
         
