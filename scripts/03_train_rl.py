@@ -23,23 +23,13 @@ from stable_baselines3.common.monitor import Monitor
 # ── 경로 설정 (새로운 아키텍처 반영) ──────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))      # scripts/
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)                       # 프로젝트 루트
-SRC_DIR = os.path.join(ROOT_DIR, "src")                      # 소스 코드 디렉토리
+SRC_DIR = os.path.join(ROOT_DIR, "src")                     # 소스 코드 디렉토리
 
 # 환경(Env) 및 모델(Models) 임포트를 위해 src 경로 추가
-if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
-# 폴더 이동 전(현재 구조)에서도 작동하도록 commander 경로 임시 추가 (차후 삭제 가능)
-COMMANDER_DIR = os.path.join(ROOT_DIR, "commander")
-if COMMANDER_DIR not in sys.path:
-    sys.path.insert(0, COMMANDER_DIR)
-
-try:
-    # 신규 아키텍처 경로 (src/envs/trading_env_baby.py)
-    from envs.trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
-except ImportError:
-    # 기존 레거시 경로 Fallback
-    from crypto_trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
+from src.envs.trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
 
 
 # ── 하이퍼파라미터 프로파일 ──────────────────────────────────────────────────
@@ -72,40 +62,59 @@ PPO_TUNING_PROFILES = {
 
 # ── 콜백 (스마트 조기 종료) ────────────────────────────────────────────────
 class SmartStopCallback(BaseCallback):
-    """엔트로피 저하 및 보상 정체 시 조기 종료하는 콜백"""
-    def __init__(self, patience=15, reward_target=None, entropy_threshold=0.001, no_improve_start_ratio=0.1, verbose=0):
+    """평가 보상 정체/정책 퇴화를 감지해 학습을 조기 종료합니다."""
+    def __init__(self, eval_callback, patience=30, eval_freq=10_000,
+                 entropy_threshold=-0.01, reward_target=None,
+                 total_timesteps=5_000_000, no_improve_start_ratio=0.1,
+                 verbose=1):
         super().__init__(verbose)
+        self.eval_callback = eval_callback
         self.patience = patience
+        self.eval_freq = eval_freq
         self.reward_target = reward_target
         self.entropy_threshold = entropy_threshold
-        self.no_improve_start_ratio = no_improve_start_ratio
-        self.best_mean_reward = -np.inf
-        self.patience_counter = 0
-        self.total_steps_estimate = 0
-
-    def _on_training_start(self) -> None:
-        self.total_steps_estimate = self.locals.get("total_timesteps", 0)
+        ratio = min(1.0, max(0.1, float(no_improve_start_ratio)))
+        self.no_improve_start_ratio = ratio
+        self.no_improve_check_start_step = max(1, int(total_timesteps * ratio))
+        self._no_improve_count = 0
+        self._best_reward = -np.inf
 
     def _on_step(self) -> bool:
-        # 학습 초반에는 조기 종료 비활성화
-        progress_ratio = self.num_timesteps / max(1, self.total_steps_estimate)
-        if progress_ratio < self.no_improve_start_ratio:
+        entropy = self.logger.name_to_value.get("train/entropy_loss", None)
+        if entropy is not None and entropy > self.entropy_threshold:
+            if self.verbose:
+                print(f"\n[SmartStop] 정책 퇴화 감지: entropy_loss={entropy:.6f} → 종료")
+            return False
+
+        if self.n_calls % self.eval_freq != 0:
             return True
 
-        logs = self.logger.name_to_value
-        
-        # 1. 엔트로피 굳음(과적합) 체크
-        if "train/entropy_loss" in logs:
-            entropy = abs(logs["train/entropy_loss"])
-            if entropy < self.entropy_threshold:
-                print(f"\\n[SmartStop] 엔트로피({entropy:.4f})가 임계치({self.entropy_threshold}) 미만. 탐험 종료(과적합)로 학습 중단.")
-                return False
+        current_best = self.eval_callback.best_mean_reward
+        if current_best == -np.inf:
+            return True
 
-        # 2. 보상 타겟 달성 체크
-        if self.reward_target is not None and "rollout/ep_rew_mean" in logs:
-            mean_reward = logs["rollout/ep_rew_mean"]
-            if mean_reward >= self.reward_target:
-                print(f"\\n[SmartStop] 목표 보상({mean_reward:.2f} >= {self.reward_target}) 달성! 조기 종료.")
+        if current_best > self._best_reward:
+            self._best_reward = current_best
+            self._no_improve_count = 0
+            if self.verbose:
+                print(f"[SmartStop] 개선됨: best_reward={self._best_reward:.2f}")
+        else:
+            if self.n_calls < self.no_improve_check_start_step:
+                if self.verbose:
+                    print(f"[SmartStop] 워밍업 구간: no-improve 체크 보류 ({self.n_calls}/{self.no_improve_check_start_step} steps)")
+                return True
+            self._no_improve_count += 1
+            if self.verbose:
+                print(f"[SmartStop] 개선 없음 {self._no_improve_count}/{self.patience} (best={self._best_reward:.2f})")
+
+        if self._no_improve_count >= self.patience:
+            if self.verbose:
+                print(f"\n[SmartStop] Early Stopping (best={self._best_reward:.2f})")
+            return False
+
+        if self.reward_target is not None and self._best_reward >= self.reward_target:
+            if self.verbose:
+                print(f"\n[SmartStop] 목표 달성! eval reward={self._best_reward:.2f}")
                 return False
 
         return True
@@ -115,7 +124,8 @@ class SmartStopCallback(BaseCallback):
 def train_commander(
     total_timesteps, eval_freq, patience, reward_target, entropy_threshold,
     no_improve_start_ratio, seed, model_tag, leverage, load_model_path,
-    improved_hp, split_mode, train_ratio, data_path, model_dir, log_dir, tuning_profile
+    improved_hp, split_mode, train_ratio, eval_ratio, train_ep_steps,
+    eval_window, data_path, model_dir, log_dir, tuning_profile
 ):
     print(f"\\n{'='*60}")
     print(f"🚀 Commander RL 훈련 시작 (레버리지 {leverage}x, Seed: {seed})")
@@ -163,10 +173,13 @@ def train_commander(
         render=False,
     )
     smart_stop = SmartStopCallback(
+        eval_callback=eval_callback,
         patience=patience, 
+        eval_freq=eval_freq,
         reward_target=reward_target,
         entropy_threshold=entropy_threshold,
-        no_improve_start_ratio=no_improve_start_ratio
+        total_timesteps=total_timesteps,
+        no_improve_start_ratio=no_improve_start_ratio,
     )
 
     try:
@@ -206,6 +219,9 @@ def run_train_batch(args):
         seeds = [args.seed]
     elif args.seeds:
         seeds = [int(x.strip()) for x in args.seeds.split(',')]
+        if len(seeds) < args.count:
+            raise ValueError(f"--seeds 개수({len(seeds)})가 --count({args.count})보다 작습니다.")
+        seeds = seeds[:args.count]
     else:
         seeds = [args.base_seed + i * args.seed_step for i in range(args.count)]
 
@@ -215,7 +231,12 @@ def run_train_batch(args):
         print(f"\\n[BATCH] 진행 상황: {i+1} / {len(seeds)} (현재 시드: {seed})")
         
         # 저장 폴더 태그 생성
-        tag = _next_tag(args.model_dir, args.leverage, seed)
+        if args.tag and len(seeds) == 1:
+            tag = str(args.tag)
+        elif args.tag and len(seeds) > 1:
+            tag = f"{str(args.tag)}_{i + 1:03d}"
+        else:
+            tag = _next_tag(args.model_dir, args.leverage, seed)
         
         train_commander(
             total_timesteps=args.timesteps,
@@ -231,11 +252,17 @@ def run_train_batch(args):
             improved_hp=args.improved_hp,
             split_mode=args.split_mode,
             train_ratio=args.train_ratio,
+            eval_ratio=args.eval_ratio,
+            train_ep_steps=args.train_ep_steps,
+            eval_window=args.eval_window,
             data_path=args.data_path,
             model_dir=args.model_dir,
             log_dir=args.log_dir,
             tuning_profile=args.tuning_profile
         )
+
+    if args.top_k > 0:
+        print(f"[INFO] --top-k={args.top_k} 는 통합 스크립트에서 아직 미사용입니다. (호환 인자로만 수용)")
 
     elapsed = time.time() - start_time
     hours, rem = divmod(elapsed, 3600)
@@ -260,14 +287,16 @@ if __name__ == "__main__":
     # 2. 훈련 기본 설정
     parser.add_argument("--leverage", type=int, default=2, help="레버리지 배수 (기본 2)")
     parser.add_argument("--timesteps", type=int, default=3_000_000, help="총 훈련 타임스텝 수")
+    parser.add_argument("--total-timesteps", dest="timesteps", type=int,
+                        help="--timesteps 별칭 (레거시 호환)")
     parser.add_argument("--eval-freq", type=int, default=10_000, help="평가 및 최고 모델 저장 주기")
     parser.add_argument("--tuning-profile", type=str, choices=["stable", "balanced", "aggressive"], default="balanced", help="학습 프로파일 선택")
     parser.add_argument("--load-model", type=str, default=None, help="커리큘럼 학습용 부모 모델(.zip) 경로")
     
     # 3. 조기 종료(SmartStop) 콜백 설정
-    parser.add_argument("--patience", type=int, default=15, help="성능 개선이 없을 때 기다릴 최대 주기")
+    parser.add_argument("--patience", type=int, default=30, help="성능 개선이 없을 때 기다릴 최대 주기")
     parser.add_argument("--reward-target", type=float, default=1e8, help="이 평균 보상에 도달하면 즉시 훈련 종료")
-    parser.add_argument("--entropy-threshold", type=float, default=0.001, help="엔트로피가 이 값 이하로 떨어지면 과적합으로 간주하여 종료")
+    parser.add_argument("--entropy-threshold", type=float, default=-0.01, help="entropy_loss 임계치")
     parser.add_argument("--no-improve-start-ratio", type=float, default=0.1, help="전체 타임스텝 중 조기 종료를 허용할 시작 비율 (0.1 = 10% 진행 후)")
     
     # 4. 데이터 및 저장 경로 (신규 아키텍처 기본값)
@@ -278,18 +307,20 @@ if __name__ == "__main__":
     parser.add_argument("--data-path", type=str, default=default_data_path, help="베이스 참모진 신호 데이터 경로")
     parser.add_argument("--model-dir", type=str, default=default_model_dir, help="모델 체크포인트 저장 폴더")
     parser.add_argument("--log-dir", type=str, default=default_log_dir, help="텐서보드 로그 폴더")
+    parser.add_argument("--tag", type=str, default=None, help="모델 태그 override (count=1 권장)")
+    parser.add_argument("--top-k", type=int, default=0, help="레거시 호환용 인자(현재 미사용)")
     
     # 5. 기타 레거시 옵션
     parser.add_argument("--improved-hp", action="store_true", help="(레거시) 개선된 하이퍼파라미터 사용")
     parser.add_argument("--split-mode", type=str, default="holdout", help="데이터 분할 방식")
     parser.add_argument("--train-ratio", type=float, default=0.7, help="Train 데이터 비율")
+    parser.add_argument("--eval-ratio", type=float, default=0.2, help="Eval 데이터 비율 (호환 인자)")
+    parser.add_argument("--train-ep-steps", type=int, default=20_000, help="학습 에피소드 길이 (호환 인자)")
+    parser.add_argument("--eval-window", type=int, default=20_000, help="평가 에피소드 길이 (호환 인자)")
 
     args = parser.parse_args()
 
-    # 구버전 경로에서 실행했을 때 방어 코드
     if not os.path.exists(args.data_path):
-        legacy_path = os.path.join(ROOT_DIR, "data", "commander", "base_signals_log.csv")
-        if os.path.exists(legacy_path):
-            args.data_path = legacy_path
+        raise FileNotFoundError(f"입력 데이터 파일이 없습니다: {args.data_path}")
 
     run_train_batch(args)

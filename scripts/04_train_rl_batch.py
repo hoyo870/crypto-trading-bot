@@ -19,6 +19,27 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TRAIN_SCRIPT = os.path.join(SCRIPT_DIR, "03_train_rl.py")
 BACKTEST_SCRIPT = os.path.join(SCRIPT_DIR, "05_backtest.py")
 
+
+def _default_jobs() -> int:
+    cpu_count = os.cpu_count() or 2
+    # Leave one core for OS/IO and keep minimum 1 worker.
+    return max(1, cpu_count - 1)
+
+
+def _safe_stop_processes(processes):
+    for proc, _, _, _ in processes:
+        if proc.poll() is None:
+            proc.terminate()
+
+    deadline = time.time() + 10
+    for proc, _, _, _ in processes:
+        if proc.poll() is None:
+            remaining = max(0.0, deadline - time.time())
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
 def run_parallel_orchestrator(args):
     # 입력받은 옵션을 리스트로 변환
     leverages = [int(x.strip()) for x in args.leverages.split(",")]
@@ -28,6 +49,8 @@ def run_parallel_orchestrator(args):
     tasks = deque(list(product(leverages, profiles)))
     total_tasks = len(tasks)
     active_procs = []
+    logs_dir = os.path.join(SCRIPT_DIR, "logs", "batch_train")
+    os.makedirs(logs_dir, exist_ok=True)
     
     print(f"\n{'='*65}")
     print(f"🚀 [M1 Max 병렬 훈련 사령탑 가동]")
@@ -56,27 +79,35 @@ def run_parallel_orchestrator(args):
             if args.load_model:
                 cmd.extend(["--load-model", args.load_model])
                 
+            log_path = os.path.join(logs_dir, f"train_lev{lev}_{prof}.log")
             print(f"▶️ [START] 레버리지: {lev}x | 프로파일: {prof:<10} | 시드 투입: {args.count_per_task}개")
+            print(f"    ↳ 로그 파일: {log_path}")
             
             # 백그라운드 프로세스 실행
-            proc = subprocess.Popen(cmd, cwd=SCRIPT_DIR)
-            active_procs.append((proc, lev, prof))
+            log_file = open(log_path, "w", encoding="utf-8")
+            proc = subprocess.Popen(cmd, cwd=SCRIPT_DIR, stdout=log_file, stderr=subprocess.STDOUT)
+            active_procs.append((proc, lev, prof, log_file))
         
         # 현재 돌고 있는 프로세스들의 상태 모니터링
-        for proc, lev, prof in active_procs[:]:
+        for proc, lev, prof, log_file in active_procs[:]:
             ret = proc.poll()
             
             # 프로세스가 종료되었으면 (ret is not None)
             if ret is not None:
-                active_procs.remove((proc, lev, prof))
+                log_file.close()
+                active_procs.remove((proc, lev, prof, log_file))
                 completed_tasks += 1
                 
                 # 에러 발생 시 즉시 중단 안전장치
                 if ret != 0:
                     print(f"\n[ERROR] ❌ {lev}x ({prof}) 훈련 그룹에서 치명적 에러 발생! (Exit code: {ret})")
                     print("[INFO] 메모리 안전을 위해 실행 중인 나머지 프로세스를 모두 강제 종료합니다.")
-                    for p, _, _ in active_procs:
-                        p.terminate()
+                    _safe_stop_processes(active_procs)
+                    for _, _, _, lf in active_procs:
+                        try:
+                            lf.close()
+                        except Exception:
+                            pass
                     sys.exit(ret)
                 else:
                     print(f"✅ [DONE] 레버리지: {lev}x | 프로파일: {prof:<10} (완료: {completed_tasks}/{total_tasks})")
@@ -112,7 +143,7 @@ if __name__ == "__main__":
     parser.add_argument("--count-per-task", type=int, default=10, help="각 그룹(조합)당 훈련할 모델 수 (기본: 10)")
     
     # 하드웨어 최적화 옵션
-    parser.add_argument("--jobs", type=int, default=3, help="동시 실행할 병렬 프로세스 수 (M1 Max 권장: 3~5)")
+    parser.add_argument("--jobs", type=int, default=_default_jobs(), help="동시 실행할 병렬 프로세스 수 (기본: CPU-1)")
     
     # 파이프라인 연결 옵션
     parser.add_argument("--run-backtest", action="store_true", default=True, help="훈련 종료 후 자동 일괄 백테스트 실행")

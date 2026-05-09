@@ -5,13 +5,16 @@ import pandas as pd
 import talib
 import argparse
 from torch.utils.data import Dataset, DataLoader
-from crypto_base_models import PriceActionExpert, ContextExpert
 import time
 import warnings
 warnings.filterwarnings('ignore')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
+if ROOT_DIR not in os.sys.path:
+    os.sys.path.insert(0, ROOT_DIR)
+
+from src.models.base_models import PriceActionExpert, ContextExpert
 
 DEFAULT_THRESHOLD_SETS = [
     ("conservative", 0.68, 0.22, 0.50, 0.03),
@@ -192,7 +195,7 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     test_dates = raw_dates[val_end:]
 
     print(f"[INFO] 3개의 전문가 모델 로딩 중...")
-    model_dir = os.path.join(ROOT_DIR, "models", "commander", "base")
+    model_dir = os.path.join(ROOT_DIR, "checkpoints", "base_experts")
 
     long_model = PriceActionExpert().to(device)
     long_model.load_state_dict(torch.load(os.path.join(model_dir, "long_expert.pth"), map_location=device))
@@ -235,7 +238,7 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
         'context_score': np.round(context_scores, 4)
     })
 
-    output_dir = os.path.join(ROOT_DIR, "data", "commander")
+    output_dir = os.path.join(ROOT_DIR, "data", "signals")
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, output_filename)
     results_df.to_csv(out_path, index=False)
@@ -288,7 +291,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=512,
                         help="추론 배치 크기")
     parser.add_argument("--output-filename", type=str, default="base_signals_log.csv",
-                        help="data/commander 하위 출력 파일명")
+                        help="data/signals 하위 출력 파일명")
     parser.add_argument(
         "--threshold-sets",
         type=str,
@@ -300,7 +303,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if not os.path.exists(os.path.join(ROOT_DIR, "models", "commander", "base", "long_expert.pth")):
+    if not os.path.exists(os.path.join(ROOT_DIR, "checkpoints", "base_experts", "long_expert.pth")):
         print("[ERROR] Base 모델이 없습니다. 'python train_base_models.py'를 먼저 실행하세요.")
     else:
         extract_base_signals(

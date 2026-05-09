@@ -26,19 +26,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))      # scripts/
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)                       # 프로젝트 루트
 SRC_DIR = os.path.join(ROOT_DIR, "src")                      # 소스 코드 디렉토리
 
-# 환경(Env) 및 모델(Models) 임포트를 위해 src 경로 추가
-if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
-# 폴더 이동 전(현재 구조)에서도 작동하도록 commander 경로 임시 추가
-COMMANDER_DIR = os.path.join(ROOT_DIR, "commander")
-if COMMANDER_DIR not in sys.path:
-    sys.path.insert(0, COMMANDER_DIR)
-
-try:
-    from envs.trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
-except ImportError:
-    from crypto_trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
+from src.envs.trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
 
 
 # ── 유틸리티 함수 ─────────────────────────────────────────────────────────
@@ -243,7 +234,9 @@ def _auto_discover_tags(model_dir):
 
 
 # ── 배치 매니저 ─────────────────────────────────────────────────────────────
-def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir, tuning_profile, best_metric):
+def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
+                     tuning_profile, best_metric, pick_best_per_leverage=True,
+                     best_output_path=None):
     results = []
     total = len(tags)
     
@@ -273,7 +266,7 @@ def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
             traceback.print_exc()
 
     # ── 레버리지별 베스트 모델 산출 ──
-    if results:
+    if results and pick_best_per_leverage:
         grouped = {}
         for r in results:
             grouped.setdefault(r["leverage"], []).append(r)
@@ -296,7 +289,8 @@ def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
             print(f"[Lev {lev}x] 1등: {best['tag']}")
             print(f"   => 수익률: {s.get('total_return_pct'):+.2f}% | MDD: {s.get('mdd_pct'):.2f}% | 승률: {s.get('win_rate'):.1f}%\\n")
 
-        best_output_path = os.path.join(reports_dir, "best_by_leverage.csv")
+        if not best_output_path:
+            best_output_path = os.path.join(reports_dir, "best_by_leverage.csv")
         with open(best_output_path, "w", encoding="utf-8") as f:
             f.write("\\n".join(best_lines) + "\\n")
         print(f"💾 베스트 결과 저장 완료: {best_output_path}\\n")
@@ -318,19 +312,27 @@ if __name__ == "__main__":
     parser.add_argument("--reports-dir", type=str, default=default_reports_dir, help="리포트 및 차트 출력 폴더")
     parser.add_argument("--tuning-profile", type=str, choices=["stable", "balanced", "aggressive"], default="balanced")
     parser.add_argument("--best-metric", type=str, choices=["score", "total_return_pct", "sharpe_ratio", "mdd_pct"], default="score", help="1등 선발 기준")
+    parser.add_argument("--source", type=str, default=None, help="레거시 호환 인자(현재 미사용)")
+    parser.add_argument("--workers", type=int, default=1, help="레거시 호환 인자(현재 단일 프로세스 실행)")
+    parser.add_argument("--pick-best-per-leverage", action="store_true", default=True,
+                        help="레버리지별 베스트 모델 CSV 생성")
+    parser.add_argument("--no-pick-best-per-leverage", dest="pick_best_per_leverage", action="store_false",
+                        help="레버리지별 베스트 모델 CSV 생성을 비활성화")
+    parser.add_argument("--best-output", type=str, default=None, help="베스트 CSV 출력 경로 override")
     
     args = parser.parse_args()
 
-    # 구버전 경로에서 실행했을 때 방어 코드
     if not os.path.exists(args.data_path):
-        legacy_path = os.path.join(ROOT_DIR, "data", "commander", "base_signals_log.csv")
-        if os.path.exists(legacy_path):
-            args.data_path = legacy_path
-            
+        print(f"[ERROR] 데이터 파일이 없습니다: {args.data_path}")
+        sys.exit(1)
     if not os.path.exists(args.model_dir):
-        legacy_model_path = os.path.join(ROOT_DIR, "models", "commander", "candidates")
-        if os.path.exists(legacy_model_path):
-            args.model_dir = legacy_model_path
+        print(f"[ERROR] 모델 폴더가 없습니다: {args.model_dir}")
+        sys.exit(1)
+
+    if args.source:
+        print("[INFO] --source 인자는 현재 통합 백테스트에서 사용되지 않습니다.")
+    if args.workers > 1:
+        print("[INFO] --workers>1 은 현재 미지원이며 단일 프로세스로 실행합니다.")
 
     if args.tags:
         tags = [t.strip() for t in args.tags.split(",") if t.strip()]
@@ -347,5 +349,7 @@ if __name__ == "__main__":
         data_path=args.data_path,
         reports_dir=args.reports_dir,
         tuning_profile=args.tuning_profile,
-        best_metric=args.best_metric
+        best_metric=args.best_metric,
+        pick_best_per_leverage=args.pick_best_per_leverage,
+        best_output_path=args.best_output,
     )

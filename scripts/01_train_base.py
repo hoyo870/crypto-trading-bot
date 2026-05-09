@@ -6,13 +6,15 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import f1_score, accuracy_score
 from copy import deepcopy
 
-from crypto_base_models import PriceActionExpert, ContextExpert, prepare_expert_data
-
 import warnings
 warnings.filterwarnings('ignore')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
+if ROOT_DIR not in os.sys.path:
+    os.sys.path.insert(0, ROOT_DIR)
+
+from src.models.base_models import PriceActionExpert, ContextExpert, prepare_expert_data
 
 def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -88,7 +90,7 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
                 break
 
     # 최고 모델 저장
-    model_dir = os.path.join(ROOT_DIR, "models", "commander", "base")
+    model_dir = os.path.join(ROOT_DIR, "checkpoints", "base_experts")
     os.makedirs(model_dir, exist_ok=True)
     save_path = os.path.join(model_dir, f"{expert_type}_expert.pth")
     if best_model_weights is not None:
