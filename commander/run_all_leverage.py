@@ -16,7 +16,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PARALLEL_JOBS = 3
 
 DEFAULT_PROFILES = ("stable", "balanced", "aggressive")
-DEFAULT_LEVERAGES = (1,)
+DEFAULT_LEVERAGES = (1,1,1)
 DEFAULT_COUNT_PER_TASK = 33
 
 
