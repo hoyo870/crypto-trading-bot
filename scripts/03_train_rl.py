@@ -191,8 +191,7 @@ def train_commander(
     except KeyboardInterrupt:
         print("\\n[INFO] 사용자에 의해 학습이 강제 중단되었습니다.")
     finally:
-        # 최종 모델 저장 (가장 좋았던 모델은 EvalCallback이 이미 저장함)
-        final_path = os.path.join(model_dir, model_tag, f"final_model_{model_tag}.zip")
+        # 최종 모델 저장 (가장 좋았던 모델은 EvalCallback이 이미 저장함)        os.makedirs(os.path.join(model_dir, model_tag), exist_ok=True)  # 디렉터리 보장        final_path = os.path.join(model_dir, model_tag, f"final_model_{model_tag}.zip")
         model.save(final_path)
         print(f"✅ 훈련 종료! 최종 모델 저장됨: {final_path}")
         

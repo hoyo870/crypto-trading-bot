@@ -105,7 +105,7 @@ def run_parallel_orchestrator(args):
             ]
             
             if args.load_model:
-                cmd.extend(["--load-model", args.load_model])
+                cmd.extend(["--load-model", _repo_abs(args.load_model)])  # 경로 절대화
                 
             log_path = os.path.join(logs_dir, f"train_lev{lev}_{prof}.log")
             print(f"▶️ [START] 레버리지: {lev}x | 프로파일: {prof:<10} | 시드 투입: {args.count_per_task}개")

@@ -140,7 +140,11 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     if 'atr' in df.columns:
         df.drop(columns=['atr'], inplace=True)
 
-    raw_filepath = data_path.replace("_processed.csv", "_5m_raw.csv")
+    # raw 경로 결정: 명시적 인자 우선, 미지정 시 data_path 기반 자동 생성
+    if args.raw_data_path:
+        raw_filepath = args.raw_data_path
+    else:
+        raw_filepath = data_path.replace("_processed.csv", "_5m_raw.csv")
     df_raw = pd.read_csv(raw_filepath)
     df = pd.merge(df, df_raw[['timestamp', 'open', 'high', 'low', 'close', 'volume']], on='timestamp', suffixes=('', '_raw'))
 
@@ -286,6 +290,8 @@ if __name__ == "__main__":
     parser.add_argument("--data-path", type=str,
                         default=os.path.join(ROOT_DIR, "data", "BTC_USDT_processed.csv"),
                         help="검증 대상 processed CSV")
+    parser.add_argument("--raw-data-path", type=str, default=None,
+                        help="Raw CSV 경로 (지정 시 우선). 미지정 시 --data-path 기반 자동 생성")
     parser.add_argument("--seq-length", type=int, default=120,
                         help="입력 시퀀스 길이")
     parser.add_argument("--batch-size", type=int, default=512,
