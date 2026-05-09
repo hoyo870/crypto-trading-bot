@@ -161,8 +161,11 @@ def run_train_batch(count, leverage, timesteps, patience, improved_hp,
             "--model-dir", model_dir,
             "--data-path", data_path,
         ]
-        if load_model and os.path.exists(load_model):
-            cmd += ["--load-model", load_model]
+        if load_model:
+            if os.path.exists(load_model):
+                cmd += ["--load-model", load_model]
+            else:
+                print(f"[WARN] load_model 파일 없음, 파인튜닝 스킵: {load_model}")
         if improved_hp:
             cmd.append("--improved-hp")
 

@@ -16,7 +16,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PARALLEL_JOBS = 3
 
 DEFAULT_PROFILES = ("stable", "balanced", "aggressive")
-DEFAULT_LEVERAGES = (1,1,1)
+DEFAULT_LEVERAGES = (1,)
 DEFAULT_COUNT_PER_TASK = 33
 
 
@@ -72,9 +72,12 @@ def _launch_training(count, leverage, tuning_profile, load_model=None):
         "--no-improve-start-ratio", "0.1",  # 학습 초반 10%는 no-improve 카운트 시작 안 함
         "--split-mode", "holdout",
     ]
-    if load_model and os.path.exists(load_model):
-        cmd += ["--load-model", load_model]
-        print(f"[INFO] 파인튜닝 모드: {os.path.basename(load_model)} → {tuning_profile}")
+    if load_model:
+        if os.path.exists(load_model):
+            cmd += ["--load-model", load_model]
+            print(f"[INFO] 파인튜닝 모드: {os.path.basename(load_model)} → {tuning_profile}")
+        else:
+            print(f"[WARN] Gen1 모델 파일 없음, 파인튜닝 스킵: {load_model}")
     return subprocess.Popen(cmd, cwd=BASE_DIR), seeds, tags
 
 
@@ -116,7 +119,8 @@ def run_parallel_trainings(parallel_jobs=DEFAULT_PARALLEL_JOBS,
     if gen1_meta_path:
         meta_path = os.path.abspath(gen1_meta_path)
         if os.path.exists(meta_path):
-            meta = json.loads(open(meta_path, encoding="utf-8").read())
+            with open(meta_path, encoding="utf-8") as _f:
+                meta = json.load(_f)
             for m in meta.get("models", []):
                 zip_path = m.get("zip_path", "")
                 if not os.path.isabs(zip_path):
