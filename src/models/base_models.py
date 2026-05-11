@@ -103,7 +103,10 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     if 'atr' in df.columns:
         df.drop(columns=['atr'], inplace=True)
 
-    raw_filepath = filepath.replace("_processed.csv", "_5m_raw.csv")
+    raw_filepath = filepath.replace(
+        os.path.join("data", "processed"),
+        os.path.join("data", "raw")
+    ).replace("_processed.csv", "_5m_raw.csv")
     df_raw = pd.read_csv(raw_filepath)
     df = pd.merge(df, df_raw[['timestamp', 'open', 'high', 'low', 'close', 'volume']], on='timestamp', suffixes=('', '_raw'))
 

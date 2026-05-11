@@ -146,7 +146,8 @@ def _parse_threshold_sets(raw):
     return parsed
 
 def extract_base_signals(data_path, seq_length=120, batch_size=512,
-                         threshold_sets=None, output_filename="base_signals_log.csv"):
+                         threshold_sets=None, output_filename="base_signals_log.csv",
+                         raw_data_path=None):
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     logger.info(f"[INFO] 테스트 데이터를 위한 전체 시계열 로딩 중...")
 
@@ -156,8 +157,8 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
         df.drop(columns=['atr'], inplace=True)
 
     # raw 경로 결정: 명시적 인자 우선, 미지정 시 data_path 기반 자동 생성
-    if args.raw_data_path:
-        raw_filepath = args.raw_data_path
+    if raw_data_path:
+        raw_filepath = raw_data_path
     else:
         raw_filepath = data_path.replace("_processed.csv", "_5m_raw.csv")
     df_raw = pd.read_csv(raw_filepath)
@@ -303,7 +304,7 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Base 신호 검증 및 통계 리포트")
     parser.add_argument("--data-path", type=str,
-                        default=os.path.join(ROOT_DIR, "data", "BTC_USDT_processed.csv"),
+                        default=os.path.join(ROOT_DIR, "data", "processed", "BTC_USDT_processed.csv"),
                         help="검증 대상 processed CSV")
     parser.add_argument("--raw-data-path", type=str, default=None,
                         help="Raw CSV 경로 (지정 시 우선). 미지정 시 --data-path 기반 자동 생성")
@@ -333,4 +334,5 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             threshold_sets=_parse_threshold_sets(args.threshold_sets),
             output_filename=args.output_filename,
+            raw_data_path=args.raw_data_path,
         )

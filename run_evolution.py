@@ -109,8 +109,7 @@ def run_evolution_pipeline(args):
     logger.info(f"🧬 [마법의 진화 파이프라인 가동] 목표: {start_gen}세대 ➡️ {end_gen}세대")
     logger.info(f"{'='*70}")
 
-    parent_model_path = args.initial_parent # 1세대 시작 시 외부 모델을 꽂고 싶을 때
-
+    parent_model_path = args.initial_parent # 1세대 시작 시 외부 모델을 꽂고 싶을 때    gen_reports_dir = reports_root          # 루프 실행 전 기본값 (NameError 방지)
     for gen in range(start_gen, end_gen + 1):
         gen_start_time = time.time()
         
@@ -143,7 +142,10 @@ def run_evolution_pipeline(args):
         env_vars["PYTHONIOENCODING"] = "utf-8"
         
         # 04_train 스크립트 실행 (백테스트는 파이프라인에서 직접 통제하므로 no-backtest 옵션 추가 요망)
-        subprocess.run(train_cmd, env=env_vars, cwd=ROOT_DIR)
+        result = subprocess.run(train_cmd, env=env_vars, cwd=ROOT_DIR)
+        if result.returncode != 0:
+            logger.error(f"❌ [{gen_str}] 훈련 스크립트 실패 (exit {result.returncode}). 진화를 중단합니다.")
+            break
         
         # --- [Phase 2: 백테스트 및 평가] ---
         logger.info("")
@@ -154,7 +156,10 @@ def run_evolution_pipeline(args):
             "--reports-dir", gen_reports_dir,
             "--jobs", str(args.jobs)
         ]
-        subprocess.run(bt_cmd, env=env_vars, cwd=ROOT_DIR)
+        result = subprocess.run(bt_cmd, env=env_vars, cwd=ROOT_DIR)
+        if result.returncode != 0:
+            logger.error(f"❌ [{gen_str}] 백테스트 스크립트 실패 (exit {result.returncode}). 진화를 중단합니다.")
+            break
         
         # --- [Phase 3: 자동 폐기 및 다음 세대 부모 선발] ---
         best_tag = auto_discard_models(gen_reports_dir, gen_model_dir, gen_logs_dir, args.auto_discard_top)

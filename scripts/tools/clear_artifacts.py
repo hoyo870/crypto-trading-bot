@@ -17,27 +17,28 @@ import shutil
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parent
-ROOT_DIR = BASE_DIR.parent
+BASE_DIR = Path(__file__).resolve().parent  # scripts/tools/
+SCRIPTS_DIR = BASE_DIR.parent               # scripts/
+ROOT_DIR = SCRIPTS_DIR.parent              # 프로젝트 루트
 
 
 def _collect_targets(targets):
     entries = []
 
     if "logs" in targets:
-        entries.extend([
-            BASE_DIR / "logs" / "train",
-            BASE_DIR / "logs" / "backtest",
-        ])
+        train_dir = ROOT_DIR / "logs" / "train"
+        if train_dir.exists():
+            entries.extend([p for p in train_dir.iterdir() if not p.name.startswith('.')])
 
     if "reports" in targets:
-        entries.append(BASE_DIR / "reports")
+        reports_dir = ROOT_DIR / "reports"
+        if reports_dir.exists():
+            entries.extend([p for p in reports_dir.iterdir() if not p.name.startswith('.')])
 
     if "models" in targets:
-        entries.extend([
-            ROOT_DIR / "models" / "commander" / "candidates",
-            ROOT_DIR / "models" / "commander" / "runs",
-        ])
+        rl_dir = ROOT_DIR / "checkpoints" / "rl_generations"
+        if rl_dir.exists():
+            entries.extend([p for p in rl_dir.iterdir() if not p.name.startswith('.')])
 
     return entries
 
@@ -59,24 +60,17 @@ def _remove_path(path, dry_run):
 
 def _recreate_layout(targets):
     if "logs" in targets:
-        (BASE_DIR / "logs" / "train").mkdir(parents=True, exist_ok=True)
-        (BASE_DIR / "logs" / "backtest").mkdir(parents=True, exist_ok=True)
+        (ROOT_DIR / "logs" / "train").mkdir(parents=True, exist_ok=True)
 
     if "reports" in targets:
-        (BASE_DIR / "reports").mkdir(parents=True, exist_ok=True)
+        (ROOT_DIR / "reports").mkdir(parents=True, exist_ok=True)
 
     if "models" in targets:
-        (ROOT_DIR / "models" / "commander" / "candidates").mkdir(parents=True, exist_ok=True)
-        (ROOT_DIR / "models" / "commander" / "runs").mkdir(parents=True, exist_ok=True)
+        (ROOT_DIR / "checkpoints" / "rl_generations").mkdir(parents=True, exist_ok=True)
 
 
 def clear_artifacts(targets, dry_run=False):
-    target_dirs = _collect_targets(targets)
-    planned = []
-
-    for directory in target_dirs:
-        for child in _iter_children(directory):
-            planned.append(child)
+    planned = _collect_targets(targets)
 
     print("[INFO] 정리 대상")
     for name in sorted(targets):

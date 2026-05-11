@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import torch
 import torch.nn as nn
@@ -117,7 +118,7 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
 
 
 if __name__ == "__main__":
-    data_path = os.path.join(ROOT_DIR, "data", "BTC_USDT_processed.csv")
+    data_path = os.path.join(ROOT_DIR, "data", "processed", "BTC_USDT_processed.csv")
     if not os.path.exists(data_path):
         logger.error("[ERROR] 데이터 파일을 찾을 수 없습니다.")
     else:

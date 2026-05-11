@@ -139,8 +139,7 @@ class SmartStopCallback(BaseCallback):
 def train_commander(
     total_timesteps, eval_freq, patience, reward_target, entropy_threshold,
     no_improve_start_ratio, seed, model_tag, leverage, load_model_path,
-    improved_hp, split_mode, train_ratio, eval_ratio, train_ep_steps,
-    eval_window, data_path, model_dir, log_dir, tuning_profile
+    data_path, model_dir, log_dir, tuning_profile
 ):
     start_time = time.time()
     
@@ -272,12 +271,6 @@ def run_train_batch(args):
             model_tag=tag,
             leverage=args.leverage,
             load_model_path=args.load_model,
-            improved_hp=args.improved_hp,
-            split_mode=args.split_mode,
-            train_ratio=args.train_ratio,
-            eval_ratio=args.eval_ratio,
-            train_ep_steps=args.train_ep_steps,
-            eval_window=args.eval_window,
             data_path=args.data_path,
             model_dir=args.model_dir,
             log_dir=args.log_dir,
@@ -328,14 +321,6 @@ if __name__ == "__main__":
     parser.add_argument("--log-dir", type=str, default=default_log_dir, help="텐서보드 로그 폴더")
     parser.add_argument("--tag", type=str, default=None, help="모델 태그 override (count=1 권장)")
     parser.add_argument("--top-k", type=int, default=0, help="레거시 호환용 인자(현재 미사용)")
-    
-    # 5. 기타 레거시 옵션
-    parser.add_argument("--improved-hp", action="store_true", help="(레거시) 개선된 하이퍼파라미터 사용")
-    parser.add_argument("--split-mode", type=str, default="holdout", help="데이터 분할 방식")
-    parser.add_argument("--train-ratio", type=float, default=0.7, help="Train 데이터 비율")
-    parser.add_argument("--eval-ratio", type=float, default=0.2, help="Eval 데이터 비율 (호환 인자)")
-    parser.add_argument("--train-ep-steps", type=int, default=20_000, help="학습 에피소드 길이 (호환 인자)")
-    parser.add_argument("--eval-window", type=int, default=20_000, help="평가 에피소드 길이 (호환 인자)")
 
     args = parser.parse_args()
 
