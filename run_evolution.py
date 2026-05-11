@@ -43,6 +43,114 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Evolution")
 
+
+def _safe_tag_fragment(text: str) -> str:
+    """파일명/태그에서 안전하게 쓸 수 있는 조각으로 변환합니다."""
+    raw = str(text or "").strip().lower()
+    cleaned = [c if c.isalnum() or c in ("_", "-") else "_" for c in raw]
+    return "".join(cleaned).strip("_") or "parent"
+
+
+def _inject_parent_candidate(parent_path: str, gen_str: str, gen_model_dir: str) -> str | None:
+    """부모 모델을 현재 세대 비교군으로 추가하고 tags.txt 에 등록합니다."""
+    if not parent_path:
+        return None
+    if not os.path.isfile(parent_path):
+        logger.warning(f"⚠️ [경고] --initial-parent 경로를 찾을 수 없어 비교군 추가를 건너뜁니다: {parent_path}")
+        return None
+
+    stem = _safe_tag_fragment(Path(parent_path).stem)
+    parent_tag = f"parent_{gen_str}_{stem}"
+    parent_zip_path = os.path.join(gen_model_dir, f"{parent_tag}.zip")
+
+    if os.path.abspath(parent_path) != os.path.abspath(parent_zip_path):
+        shutil.copy2(parent_path, parent_zip_path)
+        logger.info(f"🧬 [{gen_str}] 부모 비교군 모델 복사: {parent_zip_path}")
+    else:
+        logger.info(f"🧬 [{gen_str}] 부모 비교군 모델 재사용: {parent_zip_path}")
+
+    tags_path = os.path.join(gen_model_dir, "tags.txt")
+    existing_tags = []
+    if os.path.exists(tags_path):
+        with open(tags_path, "r", encoding="utf-8") as f:
+            existing_tags = [line.strip() for line in f if line.strip()]
+
+    if parent_tag not in existing_tags:
+        existing_tags.append(parent_tag)
+        with open(tags_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(existing_tags) + "\n")
+        logger.info(f"🏷️ [{gen_str}] tags.txt 부모 비교군 추가: {parent_tag}")
+
+    return parent_tag
+
+
+def _find_row_by_tag(reports_dir: str, tag: str):
+    """best_by_leverage.csv 에서 특정 tag 행을 찾아 반환합니다."""
+    csv_path = os.path.join(reports_dir, "best_by_leverage.csv")
+    if not os.path.exists(csv_path):
+        return None
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception:
+        return None
+    if "tag" not in df.columns:
+        return None
+    rows = df[df["tag"] == tag]
+    if rows.empty:
+        return None
+    return rows.iloc[0]
+
+
+def _should_promote_over_parent(
+    reports_dir: str,
+    winner_tag: str,
+    parent_tag: str,
+    min_score_margin: float,
+    max_mdd_delta: float,
+):
+    """
+    부모 대비 비퇴보 게이트.
+
+    승격 조건:
+      1) winner_score >= parent_score + min_score_margin
+      2) abs(winner_mdd) <= abs(parent_mdd) + max_mdd_delta
+      3) winner_sharpe >= parent_sharpe
+    """
+    winner_row = _find_row_by_tag(reports_dir, winner_tag)
+    parent_row = _find_row_by_tag(reports_dir, parent_tag)
+
+    if winner_row is None:
+        return False, f"우승 후보 행을 찾지 못함(tag={winner_tag})"
+    if parent_row is None:
+        return False, f"부모 비교군 행을 찾지 못함(tag={parent_tag})"
+
+    winner_score = float(winner_row.get("metric_value", float("-inf")))
+    parent_score = float(parent_row.get("metric_value", float("-inf")))
+    winner_mdd = abs(float(winner_row.get("mdd_pct", 999.0)))
+    parent_mdd = abs(float(parent_row.get("mdd_pct", 999.0)))
+    winner_sharpe = float(winner_row.get("sharpe_ratio", float("-inf")))
+    parent_sharpe = float(parent_row.get("sharpe_ratio", float("-inf")))
+
+    cond_score = winner_score >= (parent_score + min_score_margin)
+    cond_mdd = winner_mdd <= (parent_mdd + max_mdd_delta)
+    cond_sharpe = winner_sharpe >= parent_sharpe
+
+    if cond_score and cond_mdd and cond_sharpe:
+        return True, (
+            f"승격 통과(score {winner_score:.3f} >= {parent_score + min_score_margin:.3f}, "
+            f"MDD {winner_mdd:.2f} <= {parent_mdd + max_mdd_delta:.2f}, "
+            f"Sharpe {winner_sharpe:.3f} >= {parent_sharpe:.3f})"
+        )
+
+    reasons = []
+    if not cond_score:
+        reasons.append(f"score 미달({winner_score:.3f} < {parent_score + min_score_margin:.3f})")
+    if not cond_mdd:
+        reasons.append(f"MDD 악화({winner_mdd:.2f} > {parent_mdd + max_mdd_delta:.2f})")
+    if not cond_sharpe:
+        reasons.append(f"Sharpe 미달({winner_sharpe:.3f} < {parent_sharpe:.3f})")
+    return False, ", ".join(reasons)
+
 # ── 1. 세대(Generation) 스캐너 ─────────────────────────────────────────────
 def get_current_generation(checkpoints_dir):
     """현재 폴더 상태를 읽어 몇 세대까지 진행되었는지 파악합니다."""
@@ -123,6 +231,8 @@ def run_evolution_pipeline(args):
 
     for gen in range(start_gen, end_gen + 1):
         gen_start_time = time.time()
+        incoming_parent_path = parent_model_path
+        parent_candidate_tag = None
         
         gen_str = f"gen{gen}"
         gen_model_dir = os.path.join(checkpoints_root, gen_str)
@@ -157,6 +267,9 @@ def run_evolution_pipeline(args):
         if result.returncode != 0:
             logger.error(f"❌ [{gen_str}] 훈련 스크립트 실패 (exit {result.returncode}). 진화를 중단합니다.")
             break
+
+        # 초기/이전 세대 부모를 현재 세대 백테스트 비교군에 포함
+        parent_candidate_tag = _inject_parent_candidate(incoming_parent_path, gen_str, gen_model_dir)
         
         # --- [Phase 2: 백테스트 및 평가] ---
         logger.info("")
@@ -180,21 +293,54 @@ def run_evolution_pipeline(args):
         
         if best_tag:
             # 1. 1등 모델의 zip 파일 경로를 정확히 탐색
-            parent_model_path = os.path.join(gen_model_dir, f"{best_tag}.zip")
-            if not os.path.exists(parent_model_path):
+            winner_source_path = os.path.join(gen_model_dir, f"{best_tag}.zip")
+            if not os.path.exists(winner_source_path):
                 # 폴더 안에 저장된 경우의 Fallback
-                parent_model_path = os.path.join(gen_model_dir, best_tag, f"final_model_{best_tag}.zip")
+                winner_source_path = os.path.join(gen_model_dir, best_tag, f"final_model_{best_tag}.zip")
                 
             logger.info(f"👑 [{gen_str}] 최종 우승자: {best_tag}")
-            
-            # ✅ 2. 교정된 복사 로직 (정확히 탐색된 parent_model_path 활용)
+
+            # 부모 모델이 그대로 우승한 경우는 best_gen 복사를 생략
+            if parent_candidate_tag and best_tag == parent_candidate_tag:
+                parent_model_path = incoming_parent_path
+                logger.info(f"⏭️ [{gen_str}] 부모 모델이 계속 우승하여 best_{gen_str}.zip 복사를 생략합니다.")
+                logger.info(f"➡️ 동일 부모 모델을 {gen+1}세대 유전자로 유지합니다.")
+                gen_elapsed = time.time() - gen_start_time
+                logger.info(f"✨ [{gen_str}] 세대 완료! (소요 시간: {int(gen_elapsed//60)}분)")
+                continue
+
+            # 부모 비교군이 있으면 비퇴보 게이트 통과 시에만 승격
+            if parent_candidate_tag and not args.disable_parent_gate:
+                promote_ok, gate_reason = _should_promote_over_parent(
+                    reports_dir=gen_reports_dir,
+                    winner_tag=best_tag,
+                    parent_tag=parent_candidate_tag,
+                    min_score_margin=args.parent_score_margin,
+                    max_mdd_delta=args.parent_max_mdd_delta,
+                )
+                if not promote_ok:
+                    parent_model_path = incoming_parent_path
+                    logger.info(f"🛡️ [{gen_str}] 부모 비퇴보 게이트 미통과: {gate_reason}")
+                    logger.info(f"⏭️ [{gen_str}] 우승자 갱신/복사를 생략하고 기존 부모를 유지합니다.")
+                    gen_elapsed = time.time() - gen_start_time
+                    logger.info(f"✨ [{gen_str}] 세대 완료! (소요 시간: {int(gen_elapsed//60)}분)")
+                    continue
+                logger.info(f"✅ [{gen_str}] 부모 비퇴보 게이트 통과: {gate_reason}")
+
+            # ✅ 2. 우승 모델 복사 로직
             winner_dst = os.path.join(gen_model_dir, f"best_{gen_str}.zip")
-            if os.path.exists(parent_model_path):
-                shutil.copy2(parent_model_path, winner_dst)
+            if os.path.exists(winner_source_path):
+                if os.path.abspath(winner_source_path) == os.path.abspath(winner_dst):
+                    logger.info(f"ℹ️ [{gen_str}] 우승 모델 경로와 목적지가 동일하여 복사를 건너뜁니다.")
+                else:
+                    shutil.copy2(winner_source_path, winner_dst)
                 logger.info(f"📂 [복사완료] 우승 모델이 {winner_dst} 로 복사(보존) 되었습니다.")
                 
                 # 다음 세대로 넘겨줄 경로를, 방금 예쁘게 복사한 best_gen.zip 으로 교체!
                 parent_model_path = winner_dst
+            else:
+                logger.error(f"❌ [{gen_str}] 우승 모델 파일을 찾지 못했습니다: {winner_source_path}")
+                break
             logger.info(f"➡️ 이 모델이 {gen+1}세대의 부모 유전자로 투입됩니다.")
         else:
             logger.error("❌ [치명적 에러] 생존한 모델이 없습니다. 진화를 중단합니다.")
@@ -281,6 +427,12 @@ if __name__ == "__main__":
                         choices=["balanced", "aggressive", "conservative"],
                         default="balanced",
                         help="점수 계산 공식 (--metric score일 때만 사용, 기본: balanced)")
+    parser.add_argument("--disable-parent-gate", action="store_true",
+                        help="부모 비교군 비퇴보 게이트 비활성화 (기본: 활성)")
+    parser.add_argument("--parent-score-margin", type=float, default=1.0,
+                        help="부모 대비 최소 점수 향상 폭 (기본: 1.0)")
+    parser.add_argument("--parent-max-mdd-delta", type=float, default=2.0,
+                        help="부모 대비 허용 가능한 MDD 악화 폭 %%p (기본: 2.0)")
     
     args = parser.parse_args()
     
