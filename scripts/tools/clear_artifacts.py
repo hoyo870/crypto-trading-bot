@@ -2,9 +2,9 @@
 Commander 실험 산출물 정리 스크립트.
 
 기본 동작:
-- commander/logs 하위 내용 삭제
-- commander/reports 하위 내용 삭제
-- root/models/commander 하위 내용 삭제
+- logs/train 하위 세대별 폴더 삭제
+- reports 하위 세대별 폴더 삭제
+- checkpoints/rl_generations 하위 세대별 폴더 삭제
 - 빈 디렉토리 구조 재생성
 
 예시:

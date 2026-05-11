@@ -109,7 +109,9 @@ def run_evolution_pipeline(args):
     logger.info(f"🧬 [마법의 진화 파이프라인 가동] 목표: {start_gen}세대 ➡️ {end_gen}세대")
     logger.info(f"{'='*70}")
 
-    parent_model_path = args.initial_parent # 1세대 시작 시 외부 모델을 꽂고 싶을 때    gen_reports_dir = reports_root          # 루프 실행 전 기본값 (NameError 방지)
+    parent_model_path = args.initial_parent  # 1세대 시작 시 외부 모델을 꽂고 싶을 때
+    gen_reports_dir = reports_root            # 루프 실행 전 기본값 (NameError 방지)
+
     for gen in range(start_gen, end_gen + 1):
         gen_start_time = time.time()
         

@@ -160,7 +160,10 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     if raw_data_path:
         raw_filepath = raw_data_path
     else:
-        raw_filepath = data_path.replace("_processed.csv", "_5m_raw.csv")
+        raw_filepath = data_path.replace(
+            os.path.join("data", "processed"),
+            os.path.join("data", "raw")
+        ).replace("_processed.csv", "_5m_raw.csv")
     df_raw = pd.read_csv(raw_filepath)
     df = pd.merge(df, df_raw[['timestamp', 'open', 'high', 'low', 'close', 'volume']], on='timestamp', suffixes=('', '_raw'))
 
