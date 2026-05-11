@@ -67,7 +67,11 @@ def auto_discard_models(reports_dir, model_dir, log_dir, keep_top_k):
     best_model_tag = survivors[0] if survivors else None
     
     logger.info("")
-    logger.info(f"🧹 [자동 폐기 가동] 생존자 탑 {keep_top_k}명: {survivors}")
+    logger.info(f"🧹 [자동 폐기 가동] 생존자 탑 {keep_top_k}명 선정 (총 {len(survivors)}개)")
+    if len(survivors) <= 10:
+        logger.info(f"   생존자: {survivors}")
+    else:
+        logger.info(f"   생존자 (처음 10개): {survivors[:10]} ... 외 {len(survivors)-10}개")
     
     deleted_count = 0
     for item in os.listdir(model_dir):
@@ -162,6 +166,8 @@ def run_evolution_pipeline(args):
             "--model-dir",   gen_model_dir,
             "--reports-dir", gen_reports_dir,
             "--jobs",        str(args.jobs),
+            "--metric",      args.metric,
+            "--formula",     args.formula,
         ]
         # tags.txt 가 model_dir 에 있으면 07_backtest_batch.py 가 자동으로 읽음
         result = subprocess.run(bt_cmd, env=env_vars, cwd=ROOT_DIR)
@@ -264,6 +270,16 @@ if __name__ == "__main__":
     parser.add_argument("--auto-discard-top", type=int, default=3, 
                         help="백테스트 순위 1등 ~ K등까지만 살리고 나머지 폴더/가중치/로그 삭제 (기본: 3)\n"
                              "(전부 살리려면 999 같은 큰 숫자를 입력하세요)")
+    
+    # 랭킹 옵션
+    parser.add_argument("--metric",
+                        choices=["score", "total_return_pct", "sharpe_ratio", "mdd_pct"],
+                        default="score",
+                        help="랭킹 기준 지표 (기본: score)")
+    parser.add_argument("--formula",
+                        choices=["balanced", "aggressive", "conservative"],
+                        default="balanced",
+                        help="점수 계산 공식 (--metric score일 때만 사용, 기본: balanced)")
     
     args = parser.parse_args()
     

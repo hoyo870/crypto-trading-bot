@@ -129,7 +129,7 @@ def _load_tags(tags_arg, model_dir: str) -> list:
 # ── 배치 실행 ──────────────────────────────────────────────────────────────
 def run_backtest_batch(tags: list, model_dir: str, data_path: str,
                        reports_dir: str, tuning_profile: str,
-                       metric: str, jobs: int):
+                       metric: str, formula: str = "balanced", jobs: int = 5):
     total = len(tags)
     logger.info("")
     logger.info("=" * 70)
@@ -167,6 +167,7 @@ def run_backtest_batch(tags: list, model_dir: str, data_path: str,
         sys.executable, RANK_SCRIPT,
         "--reports-dir", reports_dir,
         "--metric",      metric,
+        "--formula",     formula,
     ]
     tags_file = os.path.join(model_dir, "tags.txt")
     if os.path.exists(tags_file):
@@ -197,6 +198,10 @@ if __name__ == "__main__":
     parser.add_argument("--metric",
                         choices=["score", "total_return_pct", "sharpe_ratio", "mdd_pct"],
                         default="score")
+    parser.add_argument("--formula",
+                        choices=["balanced", "aggressive", "conservative"],
+                        default="balanced",
+                        help="점수 계산 공식 (--metric score일 때만 사용, 기본: balanced)")
     parser.add_argument("--jobs", type=int, default=get_optimal_jobs(),
                         help="병렬 프로세스 수 (기본: CPU코어//2 자동 감지)")
 
@@ -218,5 +223,6 @@ if __name__ == "__main__":
         reports_dir=args.reports_dir,
         tuning_profile=args.tuning_profile,
         metric=args.metric,
+        formula=args.formula,
         jobs=args.jobs,
     )
