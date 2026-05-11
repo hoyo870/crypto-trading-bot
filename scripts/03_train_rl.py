@@ -51,6 +51,12 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from src.envs.trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
+from src.utils.platform_utils import configure_torch
+
+# ── 병렬 subprocess 내 스레드 수 제한 ─────────────────────────────────────
+# 04_train_rl_batch.py 가 OMP_NUM_THREADS 를 설정한 경우 준수한다.
+# PPO(MlpPolicy)는 CPU 로 동작하므로 코어 경합 방지가 중요하다.
+configure_torch("cpu")
 
 
 # ── 하이퍼파라미터 프로파일 ──────────────────────────────────────────────────

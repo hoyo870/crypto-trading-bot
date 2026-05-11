@@ -1,8 +1,8 @@
 """
 Commander 일괄 백테스트 실행기 (병렬 멀티프로세싱 최적화)
 
-단일 모델 백테스트, 다중 모델 앙상블 투표, 여러 폴더의 일괄 백테스트를
-M1 Max 멀티 코어를 활용하여 초고속으로 동시 처리합니다.
+단일 모델 백테스트, 다중 모델 앙새블 투표, 여러 폴더의 일괄 백테스트를
+멀티코어를 활용하여 초고속으로 동시 처리합니다.
 """
 
 import os
@@ -36,6 +36,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from src.envs.trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
+from src.utils.platform_utils import get_optimal_jobs
 
 # ── 로깅 설정 ─────────────────────────────────────────────────────────────
 os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
@@ -214,7 +215,7 @@ def run_backtest_all(tags, leverage_override, model_dir, data_path, reports_dir,
     logger.info(f"🚀 총 {total}개 모델 병렬 일괄 백테스트 가동 시작 (코어: {jobs}개)")
     logger.info(f"{'='*70}")
 
-    # M1 Max 코어를 100% 활용하는 ProcessPoolExecutor
+    # OS/CPU 에 맞는 ProcessPoolExecutor
     with ProcessPoolExecutor(max_workers=jobs) as executor:
         futures = {
             executor.submit(_backtest_worker, tag, leverage_override, model_dir, data_path, reports_dir, tuning_profile): tag 
@@ -293,7 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--reports-dir", type=str, default=default_reports_dir, help="리포트 및 차트 출력 폴더")
     parser.add_argument("--tuning-profile", type=str, choices=["stable", "balanced", "aggressive"], default="balanced")
     parser.add_argument("--best-metric", type=str, choices=["score", "total_return_pct", "sharpe_ratio", "mdd_pct"], default="score")
-    parser.add_argument("--jobs", type=int, default=5, help="백테스트 동시 실행 프로세스 수 (기본: 5)")
+    parser.add_argument("--jobs", type=int, default=get_optimal_jobs(), help="백테스트 동시 실행 프로세스 수 (기본: CPU코어//2 자동 감지)")
     
     args = parser.parse_args()
 

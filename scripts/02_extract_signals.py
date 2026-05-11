@@ -18,6 +18,7 @@ if ROOT_DIR not in os.sys.path:
     os.sys.path.insert(0, ROOT_DIR)
 
 from src.models.base_models import PriceActionExpert, ContextExpert
+from src.utils.platform_utils import get_device, configure_torch, get_optimal_workers, get_pin_memory, log_platform_info
 
 # ── 로깅 설정 ─────────────────────────────────────────────────────────────
 os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
@@ -148,7 +149,10 @@ def _parse_threshold_sets(raw):
 def extract_base_signals(data_path, seq_length=120, batch_size=512,
                          threshold_sets=None, output_filename="base_signals_log.csv",
                          raw_data_path=None):
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    _dev_str = get_device()
+    configure_torch(_dev_str)
+    device = torch.device(_dev_str)
+    log_platform_info(logger)
     logger.info(f"[INFO] 테스트 데이터를 위한 전체 시계열 로딩 중...")
 
     # 1. 데이터 로드 및 피처 생성 (다운샘플링 X)
@@ -236,8 +240,14 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     pv_dataset = SlidingWindowDataset(test_pv_features, seq_length)
     ctx_dataset = SlidingWindowDataset(test_ctx_features, seq_length)
     
-    pv_loader = DataLoader(pv_dataset, batch_size=batch_size, shuffle=False)
-    ctx_loader = DataLoader(ctx_dataset, batch_size=batch_size, shuffle=False)
+    pv_loader  = DataLoader(pv_dataset,  batch_size=batch_size, shuffle=False,
+                            num_workers=get_optimal_workers(),
+                            pin_memory=get_pin_memory(),
+                            persistent_workers=(get_optimal_workers() > 0))
+    ctx_loader = DataLoader(ctx_dataset, batch_size=batch_size, shuffle=False,
+                            num_workers=get_optimal_workers(),
+                            pin_memory=get_pin_memory(),
+                            persistent_workers=(get_optimal_workers() > 0))
 
     long_scores, short_scores, context_scores = [], [], []
 

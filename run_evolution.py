@@ -26,6 +26,11 @@ SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
 TRAIN_BATCH_SCRIPT = os.path.join(SCRIPTS_DIR, "04_train_rl_batch.py")
 BACKTEST_SCRIPT = os.path.join(SCRIPTS_DIR, "05_backtest.py")
 
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from src.utils.platform_utils import get_optimal_jobs
+
 # ── 로깅 설정 ─────────────────────────────────────────────────────────────
 os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
 logging.basicConfig(
@@ -247,8 +252,8 @@ if __name__ == "__main__":
     # 훈련 큐 옵션
     parser.add_argument("--count-per-task", type=int, default=10, 
                         help="각 (레버리지, 프로파일) 조합당 훈련할 씨앗(Seed) 개체 수 (기본: 10)")
-    parser.add_argument("--jobs", type=int, default=3, 
-                        help="동시 실행할 병렬 프로세스 수 (M1 Max 권장: 3)")
+    parser.add_argument("--jobs", type=int, default=get_optimal_jobs(), 
+                        help="동시 실행할 병렬 프로세스 수 (기본: CPU코어//2 자동 감지)")
     parser.add_argument("--leverages", type=str, default="1,3,5", 
                         help="훈련할 레버리지 목록 (쉼표 구분, 기본: 1,3,5)")
     parser.add_argument("--profiles", type=str, default="stable,balanced,aggressive", 

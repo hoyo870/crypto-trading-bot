@@ -18,6 +18,7 @@ if ROOT_DIR not in os.sys.path:
     os.sys.path.insert(0, ROOT_DIR)
 
 from src.models.base_models import PriceActionExpert, ContextExpert, prepare_expert_data
+from src.utils.platform_utils import get_device, configure_torch, log_platform_info
 
 # ── 로깅 설정 ─────────────────────────────────────────────────────────────
 os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
@@ -33,7 +34,10 @@ logger = logging.getLogger("TrainBase")
 
 def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     start_time = time.time()
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    _dev_str = get_device()
+    configure_torch(_dev_str)
+    device = torch.device(_dev_str)
+    log_platform_info(logger)
     logger.info("")
     logger.info(f"{'='*50}")
     logger.info(f"🚀 [{expert_type.upper()} EXPERT] 모델 훈련 시작 (Device: {device})")

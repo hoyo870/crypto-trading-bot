@@ -1,5 +1,5 @@
 """
-Commander 병렬 일괄 훈련 오케스트레이터 (M1 Max 멀티코어 최적화)
+Commander 병렬 일괄 훈련 오케스트레이터 (멀티코어 최적화)
 
 오직 03_train_rl.py를 백그라운드 프로세스로 띄워 CPU 코어를 100% 활용하는
 '병렬 훈련 큐(Queue) 관리' 역할만 수행합니다.
@@ -15,10 +15,16 @@ from collections import deque
 from itertools import product
 import logging
 
+# 경로 설정 후 platform_utils 임포트
 # ── 경로 설정 ─────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(SCRIPT_DIR)
+ROOT_DIR   = os.path.dirname(SCRIPT_DIR)
 TRAIN_SCRIPT = os.path.join(SCRIPT_DIR, "03_train_rl.py")
+
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from src.utils.platform_utils import get_optimal_jobs
 
 # ── 로깅 설정 ─────────────────────────────────────────────────────────────
 os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
@@ -52,7 +58,7 @@ def run_parallel_orchestrator(args):
     
     logger.info("")
     logger.info(f"{'='*65}")
-    logger.info(f"🚀 [M1 Max 병렬 훈련 사령탑 가동]")
+    logger.info(f"🚀 [병렬 훈련 오케스트레이터 가동]")
     logger.info(f"총 {total_tasks}개의 훈련 그룹이 큐(Queue)에 등록되었습니다.")
     logger.info(f"그룹당 시드(모델) 수: {args.count_per_task}개 | 동시 실행(코어) 수: {args.jobs}개")
     logger.info(f"{'='*65}\n")
@@ -83,8 +89,12 @@ def run_parallel_orchestrator(args):
             logger.info(f"▶️ [START] 레버리지: {lev}x | 프로파일: {prof:<10} | 시드 투입: {args.count_per_task}개")
             
             # 환경변수 상속 및 프로세스 실행
+            # 병렬 프로세스 수에 따라 OMP/MKL 스레드 수 분배 (코어 경합 방지)
+            _cpu_per_job = max(1, (os.cpu_count() or 4) // args.jobs)
             env_vars = os.environ.copy()
             env_vars["PYTHONIOENCODING"] = "utf-8"
+            env_vars["OMP_NUM_THREADS"]  = str(_cpu_per_job)
+            env_vars["MKL_NUM_THREADS"]  = str(_cpu_per_job)
             
             proc = subprocess.Popen(cmd, 
                 env=env_vars, 
@@ -130,7 +140,7 @@ if __name__ == "__main__":
     parser.add_argument("--leverages", type=str, default="1,3,5", help="쉼표로 구분된 레버리지 목록 (예: 1,3,5)")
     parser.add_argument("--profiles", type=str, default="stable,balanced,aggressive", help="쉼표로 구분된 튜닝 프로파일")
     parser.add_argument("--count-per-task", type=int, default=10, help="각 그룹(조합)당 훈련할 모델 수 (기본: 10)")
-    parser.add_argument("--jobs", type=int, default=3, help="동시 실행할 병렬 프로세스 수 (M1 Max 권장: 3~5)")
+    parser.add_argument("--jobs", type=int, default=get_optimal_jobs(), help="동시 실행할 병렬 프로세스 수 (기본: CPU코어//2 자동 감지)")
     parser.add_argument("--patience", type=int, default=30, help="03_train_rl.py로 전달할 조기종료 인내심 값")
     
     parser.add_argument("--data-path", type=str, default=os.path.join("data", "signals", "base_signals_log.csv"))

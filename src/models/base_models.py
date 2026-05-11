@@ -7,6 +7,8 @@ import talib
 import warnings
 warnings.filterwarnings('ignore')
 
+from src.utils.platform_utils import get_optimal_workers, get_pin_memory
+
 # ─────────────────────────────────────────────────────────────
 # 1. 시계열 커스텀 데이터셋 (연속성 보장 구조로 개선)
 # ─────────────────────────────────────────────────────────────
@@ -219,9 +221,18 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     val_dataset = CryptoExpertDataset(features, targets, seq_length, val_indices)
     test_dataset = CryptoExpertDataset(features, targets, seq_length, test_indices)
 
-    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True,
+                              num_workers=get_optimal_workers(),
+                              pin_memory=get_pin_memory(),
+                              persistent_workers=(get_optimal_workers() > 0))
+    val_loader   = DataLoader(val_dataset,   batch_size=256, shuffle=False,
+                              num_workers=get_optimal_workers(),
+                              pin_memory=get_pin_memory(),
+                              persistent_workers=(get_optimal_workers() > 0))
+    test_loader  = DataLoader(test_dataset,  batch_size=256, shuffle=False,
+                              num_workers=get_optimal_workers(),
+                              pin_memory=get_pin_memory(),
+                              persistent_workers=(get_optimal_workers() > 0))
 
     print(f"[INFO] 🎯 시계열 유지 다운샘플링 및 분할 완료 (Train: {len(train_indices):,}, Val: {len(val_indices):,})")
     
