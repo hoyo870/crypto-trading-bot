@@ -1,116 +1,180 @@
 ﻿# Crypto Trading Bot
 
-강화학습 기반 암호화폐 트레이딩 연구/실험 저장소입니다.
+강화학습(RL) 기반 암호화폐 레버리지 선물 트레이딩 연구·실험 저장소입니다.  
+Base Expert(LSTM) → 신호 추출 → PPO RL Agent → 자동 세대 진화 파이프라인으로 구성됩니다.
 
-현재 파이프라인은 scripts 폴더(01~05)와 src 폴더를 기준으로 동작합니다.
+---
 
 ## Repository Layout
 
-- scripts/: 실행 엔트리 포인트 (01~05)
-- src/: 모델/환경 핵심 코드
-- checkpoints/: 학습 결과물 (base_experts, rl_generations)
-- data/: raw/processed/signals 데이터
-- legacy/: 과거 실험 코드(참고용)
-- requirements.txt: 의존성 목록
+```
+.
+├── run_evolution.py          # ★ 원클릭 진화 파이프라인 오케스트레이터
+├── scripts/
+│   ├── 01_train_base.py      # Base Expert (Long/Short/Context LSTM) 학습
+│   ├── 02_extract_signals.py # 신호 추출 (long_score / short_score / context_score)
+│   ├── 03_train_rl.py        # RL Agent (PPO) 단일/배치 학습
+│   ├── 04_train_rl_batch.py  # 병렬 훈련 큐 오케스트레이터 (M1 Max 최적화)
+│   ├── 05_backtest.py        # 병렬 일괄 백테스트 및 랭킹 산출
+│   └── tools/
+│       └── clear_artifacts.py  # 실험 산출물 일괄 정리
+├── src/
+│   ├── envs/
+│   │   ├── trading_env_baby.py  # ★ 커리큘럼 학습 전용 경량 환경 (현재 사용)
+│   │   └── trading_env.py       # 풀 패널티 환경 (레거시)
+│   └── models/
+│       └── base_models.py       # PriceActionExpert / ContextExpert / prepare_expert_data
+├── checkpoints/
+│   ├── base_experts/            # long/short/context expert .pth
+│   └── rl_generations/
+│       ├── gen1/                # 1세대 RL 모델 (best_gen1.zip 포함)
+│       ├── gen2/
+│       └── ...
+├── data/
+│   ├── raw/                     # OHLCV 5분봉 원본 (BTC/ETH/SOL/XRP)
+│   ├── processed/               # TA 지표 포함 가공 데이터
+│   └── signals/                 # 03 Expert 추론 결과 (RL 학습 입력)
+├── reports/
+│   ├── gen1/                    # 세대별 백테스트 차트 및 요약 JSON
+│   └── ...
+├── logs/
+│   ├── orchestrator.log         # 전체 통합 로그
+│   └── train/
+│       └── gen1/                # 세대별 분리 로그 (train.log / batch.log / backtest.log)
+└── requirements.txt
+```
+
+---
 
 ## Setup
 
-### 1) Python 가상환경 생성
-
-Windows (PowerShell):
-
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-macOS (zsh/bash):
+### 1) Python 환경 (conda 권장)
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-python -m pip install --upgrade pip
+conda create -n cryptobot python=3.10
+conda activate cryptobot
 pip install -r requirements.txt
 ```
 
-### 2) TA-Lib 안내 (macOS)
-
-requirements.txt에는 OS 분기 처리가 되어 있습니다.
-
-- Windows: TA-Lib-binary 설치
-- macOS/Linux: TA-Lib 설치
-
-macOS에서 TA-Lib 설치가 실패하면 아래를 먼저 실행하세요.
+### 2) TA-Lib 설치 (macOS)
 
 ```bash
 brew install ta-lib
-pip install -r requirements.txt
+pip install TA-Lib
 ```
 
-## Smoke Scenario (01 -> 02 -> 03 -> 05)
+---
 
-아래는 현재 구조 기준 최소 실행 예시입니다.
+## 실행 흐름 (01 → 02 → 진화 파이프라인)
 
-### 01) Base Expert 학습
+### Step 01 — Base Expert 학습
+
+Long / Short / Context 3개의 LSTM 신호 전문가를 학습합니다.
 
 ```bash
-python scripts/01_train_base.py --data-path data/processed/BTC_USDT_processed.csv
+# BTC 기본
+python scripts/01_train_base.py
+
+# 다른 심볼 지정
+python scripts/01_train_base.py --symbol ETH_USDT
+python scripts/01_train_base.py --symbol SOL_USDT
 ```
 
-산출물:
+산출물: `checkpoints/base_experts/{long,short,context}_expert.pth`
 
-- checkpoints/base_experts/long_expert.pth
-- checkpoints/base_experts/short_expert.pth
-- checkpoints/base_experts/context_expert.pth
+---
 
-### 02) Base Signal 생성
+### Step 02 — Base Signal 추출
 
-02 스크립트는 processed 파일명 규칙에서 raw 파일 경로를 유도합니다.
-예: data/processed/BTC_USDT_processed.csv -> data/processed/BTC_USDT_5m_raw.csv
+학습된 Expert로 전체 시계열에 대한 점수를 추론해 RL 학습용 신호 파일을 생성합니다.
 
 ```bash
-python scripts/02_extract_signals.py \
-  --data-path data/processed/BTC_USDT_processed.csv \
-  --output-filename base_signals_log.csv
+# BTC 기본 (출력: data/signals/BTC_USDT_signals_log.csv)
+python scripts/02_extract_signals.py
+
+# 다른 심볼
+python scripts/02_extract_signals.py --symbol ETH_USDT
+# 출력: data/signals/ETH_USDT_signals_log.csv
 ```
 
-산출물:
+산출물: `data/signals/{symbol}_signals_log.csv`
 
-- data/signals/base_signals_log.csv
+---
 
-### 03) RL 학습
+### Step 03 — 진화 파이프라인 (★ 메인)
+
+`run_evolution.py`가 훈련(04) → 백테스트(05) → 자동 폐기 → 다음 세대 이식을 자동 반복합니다.
 
 ```bash
+# 시나리오 1: 1세대만 가볍게 (각 조합 10개, 전부 보존)
+python run_evolution.py --target-generations 1 --count-per-task 10 --auto-discard-top 999
+
+# 시나리오 2: 3세대 연속 진화 (1등만 살아남아 다음 세대 부모로 이식)
+python run_evolution.py \
+  --target-generations 3 \
+  --auto-discard-top 1 \
+  --leverages 1,3,5 \
+  --profiles stable,balanced,aggressive \
+  --count-per-task 33
+
+# 시나리오 3: 과거 모델에서 파인튜닝 시작
+python run_evolution.py \
+  --initial-parent checkpoints/rl_generations/gen1/best_gen1.zip \
+  --target-generations 2
+```
+
+| 파라미터 | 기본값 | 설명 |
+|----------|--------|------|
+| `--target-generations` | 1 | 진화시킬 세대 수 |
+| `--leverages` | `1,3,5` | 레버리지 목록 (쉼표 구분) |
+| `--profiles` | `stable,balanced,aggressive` | 하이퍼파라미터 프로파일 |
+| `--count-per-task` | 10 | (레버리지 × 프로파일) 조합당 학습 모델 수 |
+| `--jobs` | 3 | 병렬 프로세스 수 |
+| `--auto-discard-top` | 3 | 백테스트 상위 K개만 보존, 나머지 삭제 |
+| `--initial-parent` | None | 1세대 시작 시 부모 가중치 경로 (파인튜닝) |
+
+---
+
+### 개별 스크립트 직접 실행 (고급)
+
+```bash
+# 단일 RL 학습
 python scripts/03_train_rl.py \
-  --data-path data/signals/base_signals_log.csv \
-  --leverage 2 \
-  --count 1 \
-  --timesteps 3000000
-```
+  --data-path data/signals/BTC_USDT_signals_log.csv \
+  --leverage 2 --tuning-profile balanced \
+  --count 1 --timesteps 3000000
 
-산출물:
+# 병렬 배치 학습
+python scripts/04_train_rl_batch.py \
+  --leverages 1,3 --profiles stable,balanced \
+  --count-per-task 5 --jobs 3
 
-- checkpoints/rl_generations/<tag>/best_model.zip
-- checkpoints/rl_generations/<tag>/final_model_<tag>.zip
-
-### 05) 백테스트
-
-```bash
+# 백테스트
 python scripts/05_backtest.py \
-  --model-dir checkpoints/rl_generations \
-  --data-path data/signals/base_signals_log.csv \
-  --reports-dir reports
+  --model-dir checkpoints/rl_generations/gen1 \
+  --data-path data/signals/BTC_USDT_signals_log.csv \
+  --reports-dir reports/gen1
+
+# 산출물 정리 (dry-run)
+python scripts/tools/clear_artifacts.py --dry-run
+python scripts/tools/clear_artifacts.py --targets logs,reports --yes
 ```
 
-산출물:
+---
 
-- reports/rl_backtest_summary_<tag>.json
-- reports/rl_backtest_chart_<tag>.png
-- reports/best_by_leverage.csv
+## 환경 구조 (BabyLeverageTradingEnv)
+
+- **Action Space**: `Discrete(6)` — 0=홀드, 1=롱Full, 2=롱Half, 3=숏Full, 4=숏Half, 5=청산
+- **Observation**: `Box(13,)` — long/short/context score, 포지션, 미실현 손익, 시간 피처, 레버리지, 홀드비율, DD
+- **Train/Eval 분리**: `mode="train"` → 전체 데이터의 앞 70% | `mode="eval"` → 뒤 30%
+- **Max Episode**: 20,000 스텝 (~70일, 5분봉 기준)
+- **청산 벌점**: LIQ_PENALTY = 100.0 (커리큘럼 완화)
+
+---
 
 ## Notes
 
-- RL 직렬화 호환성을 위해 requirements.txt의 torch/stable-baselines3 버전을 유지하는 것을 권장합니다.
-- 대량 실행은 scripts/04_train_rl_batch.py를 사용하세요.
+- `requirements.txt`의 `torch` / `stable-baselines3` 버전을 변경하면 저장된 모델 직렬화 호환성이 깨질 수 있습니다.
+- 세대별 로그는 `logs/train/gen{N}/` 에 `train.log` / `batch.log` / `backtest.log`로 분리 저장됩니다.
+- `--auto-discard-top 999`로 설정하면 폐기 없이 모든 산출물을 보존할 수 있습니다.
+

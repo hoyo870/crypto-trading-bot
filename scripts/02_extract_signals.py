@@ -306,17 +306,18 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Base 신호 검증 및 통계 리포트")
-    parser.add_argument("--data-path", type=str,
-                        default=os.path.join(ROOT_DIR, "data", "processed", "BTC_USDT_processed.csv"),
-                        help="검증 대상 processed CSV")
+    parser.add_argument("--symbol", type=str, default="BTC_USDT",
+                        help="신호 추출 대상 심볼 (기본: BTC_USDT). 예: ETH_USDT, SOL_USDT, XRP_USDT")
+    parser.add_argument("--data-path", type=str, default=None,
+                        help="processed CSV 경로 (미지정 시 --symbol 기반 자동 생성)")
     parser.add_argument("--raw-data-path", type=str, default=None,
                         help="Raw CSV 경로 (지정 시 우선). 미지정 시 --data-path 기반 자동 생성")
     parser.add_argument("--seq-length", type=int, default=120,
                         help="입력 시퀀스 길이")
     parser.add_argument("--batch-size", type=int, default=512,
                         help="추론 배치 크기")
-    parser.add_argument("--output-filename", type=str, default="base_signals_log.csv",
-                        help="data/signals 하위 출력 파일명")
+    parser.add_argument("--output-filename", type=str, default=None,
+                        help="data/signals 하위 출력 파일명 (미지정 시 {symbol}_signals_log.csv)")
     parser.add_argument(
         "--threshold-sets",
         type=str,
@@ -328,9 +329,16 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # --symbol 기반 경로 자동 유도 (--data-path, --output-filename 명시 시 우선)
+    if args.data_path is None:
+        args.data_path = os.path.join(ROOT_DIR, "data", "processed", f"{args.symbol}_processed.csv")
+    if args.output_filename is None:
+        args.output_filename = f"{args.symbol}_signals_log.csv"
+
     if not os.path.exists(os.path.join(ROOT_DIR, "checkpoints", "base_experts", "long_expert.pth")):
-        logger.error("[ERROR] Base 모델이 없습니다. 'python train_base_models.py'를 먼저 실행하세요.")
+        logger.error("[ERROR] Base 모델이 없습니다. 'python scripts/01_train_base.py'를 먼저 실행하세요.")
     else:
+        logger.info(f"신호 추출 대상: {args.symbol} | 데이터: {args.data_path} | 출력: {args.output_filename}")
         extract_base_signals(
             data_path=args.data_path,
             seq_length=args.seq_length,

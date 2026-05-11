@@ -49,6 +49,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Backtest")
 
+# ── 세대별 로그 파일 추가 (CUSTOM_LOG_DIR 환경변수 세팅 시 backtest.log 병행 기록) ──────
+_custom_log_dir = os.environ.get("CUSTOM_LOG_DIR")
+if _custom_log_dir:
+    os.makedirs(_custom_log_dir, exist_ok=True)
+    logging.getLogger().addHandler(
+        logging.FileHandler(os.path.join(_custom_log_dir, "backtest.log"), encoding='utf-8')
+    )
+
 
 # ── 유틸리티 함수 ─────────────────────────────────────────────────────────
 def _infer_leverage_from_tag(tag):

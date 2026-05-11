@@ -118,12 +118,25 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
 
 
 if __name__ == "__main__":
-    data_path = os.path.join(ROOT_DIR, "data", "processed", "BTC_USDT_processed.csv")
+    import argparse
+    parser = argparse.ArgumentParser(description="Base Expert 모델 학습")
+    parser.add_argument("--symbol", type=str, default="BTC_USDT",
+                        help="학습 대상 심볼 (기본: BTC_USDT). 실제 사용 가능한 값: BTC_USDT, ETH_USDT, SOL_USDT, XRP_USDT")
+    parser.add_argument("--data-path", type=str, default=None,
+                        help="processed CSV 경로 (미지정 시 --symbol 기반 자동 생성)")
+    parser.add_argument("--seq-length", type=int, default=120, help="LSTM 시퀀스 길이")
+    parser.add_argument("--epochs", type=int, default=50, help="최대 학습 에폭")
+    parser.add_argument("--patience", type=int, default=7, help="조기 종료 인내심")
+    args = parser.parse_args()
+
+    data_path = args.data_path or os.path.join(
+        ROOT_DIR, "data", "processed", f"{args.symbol}_processed.csv"
+    )
     if not os.path.exists(data_path):
-        logger.error("[ERROR] 데이터 파일을 찾을 수 없습니다.")
+        logger.error(f"[ERROR] 데이터 파일을 찾을 수 없습니다: {data_path}")
     else:
-        # 3명의 전문가를 순차적으로 훈련
-        train_expert('long', data_path, seq_length=120)
-        train_expert('short', data_path, seq_length=120)
-        train_expert('context', data_path, seq_length=120)
+        logger.info(f"학습 대상 심볼: {args.symbol} | 데이터: {data_path}")
+        train_expert('long',    data_path, seq_length=args.seq_length, epochs=args.epochs, patience=args.patience)
+        train_expert('short',   data_path, seq_length=args.seq_length, epochs=args.epochs, patience=args.patience)
+        train_expert('context', data_path, seq_length=args.seq_length, epochs=args.epochs, patience=args.patience)
         logger.info("\n🎉 모든 Base 전문가 모델 훈련이 완료되었습니다!")

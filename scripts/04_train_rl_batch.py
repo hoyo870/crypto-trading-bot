@@ -32,6 +32,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Batch")
 
+# ── 세대별 로그 파일 추가 (CUSTOM_LOG_DIR 환경변수 세팅 시 batch.log 병행 기록) ─────────────
+_custom_log_dir = os.environ.get("CUSTOM_LOG_DIR")
+if _custom_log_dir:
+    os.makedirs(_custom_log_dir, exist_ok=True)
+    logging.getLogger().addHandler(
+        logging.FileHandler(os.path.join(_custom_log_dir, "batch.log"), encoding='utf-8')
+    )
+
 
 def run_parallel_orchestrator(args):
     leverages = [int(x.strip()) for x in args.leverages.split(",")]

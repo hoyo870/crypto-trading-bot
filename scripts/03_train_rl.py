@@ -38,6 +38,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Commander.Train")
 
+# ── 세대별 로그 파일 추가 (CUSTOM_LOG_DIR 환경변수 세팅 시 세대 폴더에 train.log 병행 기록) ──
+_custom_log_dir = os.environ.get("CUSTOM_LOG_DIR")
+if _custom_log_dir:
+    os.makedirs(_custom_log_dir, exist_ok=True)
+    logging.getLogger().addHandler(
+        logging.FileHandler(os.path.join(_custom_log_dir, "train.log"), encoding='utf-8')
+    )
+
 # 환경(Env) 및 모델(Models) 임포트를 위해 src 경로 추가
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -323,6 +331,10 @@ if __name__ == "__main__":
     parser.add_argument("--top-k", type=int, default=0, help="레거시 호환용 인자(현재 미사용)")
 
     args = parser.parse_args()
+
+    # 환경변수 우선 적용 (run_evolution.py 또는 04_train_rl_batch.py가 직접 호출 시도 콘트롤 가능)
+    args.model_dir = os.environ.get("CUSTOM_MODEL_DIR", args.model_dir)
+    args.log_dir   = os.environ.get("CUSTOM_LOG_DIR",   args.log_dir)
 
     if not os.path.exists(args.data_path):
         raise FileNotFoundError(f"입력 데이터 파일이 없습니다: {args.data_path}")

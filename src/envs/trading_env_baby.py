@@ -63,14 +63,27 @@ class BabyLeverageTradingEnv(gym.Env):
 
         # tuning_profile 파라미터는 인터페이스 호환을 위해 수신하지만 Baby에서는 사용 안 함
         self.tuning_profile = tuning_profile
+        self.mode = mode  # "train" | "eval" | None
 
         print(f"[INFO] BabyLeverageTradingEnv v1 lev={int(self.leverage)}x  "
               f"liq_at={1/self.leverage*100:.0f}%raw  "
               f"max_hold={self.max_hold_steps}bars  "
-              f"LIQ_PENALTY={LIQ_PENALTY}  profile={self.tuning_profile}(ignored)")
+              f"LIQ_PENALTY={LIQ_PENALTY}  mode={mode or 'full'}  profile={self.tuning_profile}(ignored)")
 
         df = pd.read_csv(data_path)
         self.max_steps = len(df) - 1
+
+        # ── Train/Eval 데이터 구간 분리 (70% / 30%) ──────────────────────
+        n = self.max_steps + 1
+        if mode == "train":
+            self._step_lo = 0
+            self._step_hi = int(n * 0.7)
+        elif mode == "eval":
+            self._step_lo = int(n * 0.7)
+            self._step_hi = n
+        else:  # None: 백테스트 등 전체 구간 사용
+            self._step_lo = 0
+            self._step_hi = n
 
         self.closes         = df['close'].values.astype(np.float32)
         self.long_scores    = df['long_score'].values.astype(np.float32)
@@ -95,10 +108,14 @@ class BabyLeverageTradingEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         if options is not None and 'start_step' in options:
+            # 외부에서 명시적으로 지정한 경우 (백테스트 등)
             self.start_step = int(options['start_step'])
         else:
-            max_start = max(0, self.max_steps - MIN_EP_STEPS)
-            self.start_step = int(self.np_random.integers(0, max_start + 1))
+            # mode 기반 구간으로 랜덤 시작점 제한 (Train/Eval 갩리)
+            available_hi = self._step_hi - MIN_EP_STEPS
+            lo = max(self._step_lo, 0)
+            hi = max(lo, available_hi)
+            self.start_step = int(self.np_random.integers(lo, hi + 1))
         if options is not None and 'max_ep_steps' in options:
             max_ep_steps = options['max_ep_steps']
             self.max_episode_steps = None if max_ep_steps is None else int(max_ep_steps)
