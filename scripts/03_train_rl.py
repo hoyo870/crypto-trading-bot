@@ -149,10 +149,19 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
 
     if load_model_path and os.path.exists(load_model_path):
         logger.info(f"    부모 모델 로드: {load_model_path}")
+        # 각 자식 모델(Seed)마다 하이퍼파라미터를 무작위로 흔들어줍니다.
+        np.random.seed(seed) # 시드에 종속된 재현 가능한 돌연변이 생성
+        
+        # 1. 엔트로피(ENT): 부모의 굳어진 매매법 고집을 꺾기 위해 기준값의 1배 ~ 5배로 대폭 증폭!
+        mutated_ent = hp["ent_coef"] * float(np.random.uniform(1.0, 5.0))
+
+        # 2. 학습률(LR): 기준값의 50% ~ 150% 사이로 무작위 변형
+        mutated_lr = hp["learning_rate"] * float(np.random.uniform(0.5, 1.5))
+
         model = PPO.load(
             load_model_path, env=train_env, seed=seed,
             tensorboard_log=log_dir,
-            custom_objects={"ent_coef": hp["ent_coef"], "learning_rate": hp["learning_rate"]}
+            custom_objects={"ent_coef": mutated_ent, "learning_rate": mutated_lr}
         )
     else:
         model = PPO("MlpPolicy", train_env, verbose=0, seed=seed,
