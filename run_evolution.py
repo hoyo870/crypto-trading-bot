@@ -243,6 +243,7 @@ if __name__ == "__main__":
         epilog="""
 [실행 예시]
   python run_evolution.py --target-generations 1 --count-per-task 10
+  python run_evolution.py --target-generations 1 --count-per-task 10 --auto-discard-top 999 --leverages 1,1,1 --profiles balanced
   python run_evolution.py --target-generations 3 --auto-discard-top 1 --leverages 1,3,5 --profiles stable,balanced,aggressive --count-per-task 33
   python run_evolution.py --initial-parent "checkpoints/rl_generations/gen1/best.zip"
         """
