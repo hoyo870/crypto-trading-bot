@@ -17,6 +17,7 @@ import gc
 import logging
 
 import numpy as np
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
@@ -137,7 +138,8 @@ class SmartStopCallback(BaseCallback):
 def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
               data_path, model_dir, log_dir,
               total_timesteps, eval_freq, patience, reward_target,
-              entropy_threshold, no_improve_start_ratio):
+              entropy_threshold, no_improve_start_ratio,
+              mutation_scale=1.0):
     """seed 1개에 대한 PPO 훈련을 수행하고 저장합니다."""
     start = time.time()
     logger.info(f"  ▶ [{model_tag}] seed={seed} | lev={leverage}x | profile={tuning_profile}")
@@ -149,20 +151,58 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
 
     if load_model_path and os.path.exists(load_model_path):
         logger.info(f"    부모 모델 로드: {load_model_path}")
-        # 각 자식 모델(Seed)마다 하이퍼파라미터를 무작위로 흔들어줍니다.
-        np.random.seed(seed) # 시드에 종속된 재현 가능한 돌연변이 생성
-        
-        # 1. 엔트로피(ENT): 부모의 굳어진 매매법 고집을 꺾기 위해 기준값의 1배 ~ 5배로 대폭 증폭!
-        mutated_ent = hp["ent_coef"] * float(np.random.uniform(1.0, 5.0))
+        # 로컬 RNG 사용 → 전역 NumPy RNG 오염 방지
+        rng = np.random.default_rng(seed)
+        s = float(np.clip(mutation_scale, 0.0, 1.0))  # 적응형 변이 폭 스케일 (0.0~1.0)
 
-        # 2. 학습률(LR): 기준값의 50% ~ 150% 사이로 무작위 변형
-        mutated_lr = hp["learning_rate"] * float(np.random.uniform(0.5, 1.5))
+        # 1. 엔트로피(ENT): [1-0.2s, 1+0.5s] 범위 변이, 클램프 [0.003, 0.03]
+        mutated_ent = float(np.clip(
+            hp["ent_coef"] * rng.uniform(1.0 - 0.2 * s, 1.0 + 0.5 * s),
+            0.003, 0.03
+        ))
 
+        # 2. 학습률(LR): [1-0.2s, 1+0.2s] 범위 변이, 클램프 [1e-5, 5e-4]
+        mutated_lr = float(np.clip(
+            hp["learning_rate"] * rng.uniform(1.0 - 0.2 * s, 1.0 + 0.2 * s),
+            1e-5, 5e-4
+        ))
+
+        # 3. vf_coef: ±15%*s 변이, 클램프 [0.3, 0.7]
+        mutated_vf = float(np.clip(
+            hp["vf_coef"] * rng.uniform(1.0 - 0.15 * s, 1.0 + 0.15 * s),
+            0.3, 0.7
+        ))
+
+        # 4. clip_range: ±10%*s 변이, 클램프 [0.1, 0.3]
+        mutated_clip = float(np.clip(
+            0.2 * rng.uniform(1.0 - 0.10 * s, 1.0 + 0.10 * s),
+            0.1, 0.3
+        ))
+
+        logger.info(
+            f"    변이 적용(scale={s:.2f}) → "
+            f"ent={mutated_ent:.5f}, lr={mutated_lr:.2e}, "
+            f"vf={mutated_vf:.3f}, clip={mutated_clip:.3f}"
+        )
         model = PPO.load(
             load_model_path, env=train_env, seed=seed,
             tensorboard_log=log_dir,
-            custom_objects={"ent_coef": mutated_ent, "learning_rate": mutated_lr}
+            custom_objects={
+                "ent_coef":      mutated_ent,
+                "learning_rate": mutated_lr,
+                "vf_coef":       mutated_vf,
+                "clip_range":    mutated_clip,
+            }
         )
+
+        # 5. 가우시안 노이즈: 정책 가중치에 상대적 미세 교란 (σ_rel = 0.003*s)
+        noise_std = 0.003 * s
+        if noise_std > 0:
+            with torch.no_grad():
+                for param in model.policy.parameters():
+                    noise = torch.randn_like(param) * noise_std * param.abs().mean().clamp(min=1e-8)
+                    param.add_(noise)
+            logger.info(f"    가우시안 노이즈 적용 (σ_rel={noise_std:.4f})")
     else:
         model = PPO("MlpPolicy", train_env, verbose=0, seed=seed,
                     tensorboard_log=log_dir, **hp)
@@ -231,6 +271,7 @@ def run_train_batch(args):
             patience=args.patience, reward_target=args.reward_target,
             entropy_threshold=args.entropy_threshold,
             no_improve_start_ratio=args.no_improve_start_ratio,
+            mutation_scale=args.mutation_scale,
         )
         tags_created.append(tag)
         total_elapsed = int(time.time() - batch_start)
@@ -274,6 +315,8 @@ if __name__ == "__main__":
     parser.add_argument("--reward-target", type=float, default=1e8)
     parser.add_argument("--entropy-threshold", type=float, default=-0.01)
     parser.add_argument("--no-improve-start-ratio", type=float, default=0.1)
+    parser.add_argument("--mutation-scale", type=float, default=1.0,
+                        help="변이 폭 스케일 (1.0=최대, 0.0=변이 없음; run_evolution.py가 세대별 자동 조정)")
 
     default_data  = os.path.join(ROOT_DIR, "data", "signals", "base_signals_log.csv")
     default_model = os.path.join(ROOT_DIR, "checkpoints", "rl_generations")
@@ -286,8 +329,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # 환경변수 우선 (run_evolution.py / 04_train_rl_batch.py 연동)
-    args.model_dir = os.environ.get("CUSTOM_MODEL_DIR", args.model_dir)
-    args.log_dir   = os.environ.get("CUSTOM_LOG_DIR",   args.log_dir)
+    args.model_dir      = os.environ.get("CUSTOM_MODEL_DIR",  args.model_dir)
+    args.log_dir        = os.environ.get("CUSTOM_LOG_DIR",    args.log_dir)
+    args.mutation_scale = float(os.environ.get("MUTATION_SCALE", args.mutation_scale))
 
     if not os.path.exists(args.data_path):
         raise FileNotFoundError(f"데이터 파일 없음: {args.data_path}")

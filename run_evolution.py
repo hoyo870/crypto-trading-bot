@@ -244,7 +244,11 @@ def run_evolution_pipeline(args):
         
         logger.info("")
         logger.info(f"🌱 [시작] {gen_str} 세대 배양을 시작합니다...")
-        
+
+        # 적응형 변이 폭: 세대 진행마다 0.1씩 감소, 최소 0.3 보장
+        mutation_scale = max(0.3, args.mutation_scale_start - (gen - start_gen) * 0.1)
+        logger.info(f"🔬 [{gen_str}] 변이 폭 스케일: {mutation_scale:.2f}")
+
         # --- [Phase 1: 병렬 훈련 가동] ---
         train_cmd = [
             sys.executable, TRAIN_BATCH_SCRIPT,
@@ -260,6 +264,7 @@ def run_evolution_pipeline(args):
         env_vars = os.environ.copy()
         env_vars["CUSTOM_MODEL_DIR"] = gen_model_dir
         env_vars["CUSTOM_LOG_DIR"] = gen_logs_dir
+        env_vars["MUTATION_SCALE"] = str(mutation_scale)
         env_vars["PYTHONIOENCODING"] = "utf-8"
         
         # 04_train 스크립트 실행 (백테스트는 파이프라인에서 직접 통제하므로 no-backtest 옵션 추가 요망)
@@ -427,6 +432,8 @@ if __name__ == "__main__":
                         choices=["balanced", "aggressive", "conservative"],
                         default="balanced",
                         help="점수 계산 공식 (--metric score일 때만 사용, 기본: balanced)")
+    parser.add_argument("--mutation-scale-start", type=float, default=1.0,
+                        help="초기 변이 폭 스케일 (1.0=최대, 세대마다 0.1 감소, 최소 0.3)")
     parser.add_argument("--disable-parent-gate", action="store_true",
                         help="부모 비교군 비퇴보 게이트 비활성화 (기본: 활성)")
     parser.add_argument("--parent-score-margin", type=float, default=1.0,
