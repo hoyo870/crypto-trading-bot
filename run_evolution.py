@@ -24,7 +24,7 @@ import logging
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
 TRAIN_BATCH_SCRIPT = os.path.join(SCRIPTS_DIR, "04_train_rl_batch.py")
-BACKTEST_SCRIPT = os.path.join(SCRIPTS_DIR, "05_backtest.py")
+BACKTEST_SCRIPT = os.path.join(SCRIPTS_DIR, "07_backtest_batch.py")
 
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -159,10 +159,11 @@ def run_evolution_pipeline(args):
         logger.info(f"📊 [{gen_str}] 훈련 완료. 전체 백테스트 및 성적표 산출 중...")
         bt_cmd = [
             sys.executable, BACKTEST_SCRIPT,
-            "--model-dir", gen_model_dir,
+            "--model-dir",   gen_model_dir,
             "--reports-dir", gen_reports_dir,
-            "--jobs", str(args.jobs)
+            "--jobs",        str(args.jobs),
         ]
+        # tags.txt 가 model_dir 에 있으면 07_backtest_batch.py 가 자동으로 읽음
         result = subprocess.run(bt_cmd, env=env_vars, cwd=ROOT_DIR)
         if result.returncode != 0:
             logger.error(f"❌ [{gen_str}] 백테스트 스크립트 실패 (exit {result.returncode}). 진화를 중단합니다.")
