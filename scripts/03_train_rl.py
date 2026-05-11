@@ -155,6 +155,11 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
         rng = np.random.default_rng(seed)
         s = float(np.clip(mutation_scale, 0.0, 1.0))  # 적응형 변이 폭 스케일 (0.0~1.0)
 
+        # 파인튜닝: 변이 폭 50% 완화 (Catastrophic Forgetting 방지, 기존 학습 보존)
+        s_original = s
+        s = s * 0.5
+        logger.info(f"    [파인튜닝 모드] 변이 폭 완화: {s_original:.2f} → {s:.2f}")
+
         # 1. 엔트로피(ENT): [1-0.2s, 1+0.5s] 범위 변이, 클램프 [0.003, 0.03]
         mutated_ent = float(np.clip(
             hp["ent_coef"] * rng.uniform(1.0 - 0.2 * s, 1.0 + 0.5 * s),
@@ -180,7 +185,7 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
         ))
 
         logger.info(
-            f"    변이 적용(scale={s:.2f}) → "
+            f"    변이 적용(완화scale={s:.2f}) → "
             f"ent={mutated_ent:.5f}, lr={mutated_lr:.2e}, "
             f"vf={mutated_vf:.3f}, clip={mutated_clip:.3f}"
         )
