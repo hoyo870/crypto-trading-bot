@@ -210,6 +210,7 @@ if __name__ == "__main__":
     # 환경변수 연동 (run_evolution.py 호환)
     args.model_dir   = os.environ.get("CUSTOM_MODEL_DIR",   args.model_dir)
     args.reports_dir = os.environ.get("CUSTOM_REPORTS_DIR", args.reports_dir)
+    args.data_path   = os.environ.get("CUSTOM_DATA_PATH",   args.data_path)
 
     tags = _load_tags(args.tags, args.model_dir)
     if not tags:

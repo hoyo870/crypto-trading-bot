@@ -259,13 +259,17 @@ def run_evolution_pipeline(args):
         ]
         if parent_model_path:
             train_cmd.extend(["--load-model", parent_model_path])
-            
+        if args.data_path:
+            train_cmd.extend(["--data-path", args.data_path])
+
         # 04_train_rl_batch.py에 환경 변수로 현재 세대 경로를 넘겨줌
         env_vars = os.environ.copy()
         env_vars["CUSTOM_MODEL_DIR"] = gen_model_dir
         env_vars["CUSTOM_LOG_DIR"] = gen_logs_dir
         env_vars["MUTATION_SCALE"] = str(mutation_scale)
         env_vars["PYTHONIOENCODING"] = "utf-8"
+        if args.data_path:
+            env_vars["CUSTOM_DATA_PATH"] = args.data_path
         
         # 04_train 스크립트 실행 (백테스트는 파이프라인에서 직접 통제하므로 no-backtest 옵션 추가 요망)
         result = subprocess.run(train_cmd, env=env_vars, cwd=ROOT_DIR)
@@ -287,6 +291,8 @@ def run_evolution_pipeline(args):
             "--metric",      args.metric,
             "--formula",     args.formula,
         ]
+        if args.data_path:
+            bt_cmd.extend(["--data-path", args.data_path])
         # tags.txt 가 model_dir 에 있으면 07_backtest_batch.py 가 자동으로 읽음
         result = subprocess.run(bt_cmd, env=env_vars, cwd=ROOT_DIR)
         if result.returncode != 0:
@@ -432,6 +438,10 @@ if __name__ == "__main__":
                         choices=["balanced", "aggressive", "conservative"],
                         default="balanced",
                         help="점수 계산 공식 (--metric score일 때만 사용, 기본: balanced)")
+    parser.add_argument("--data-path", type=str, default=None,
+                        help="RL 훈련/백테스트 데이터 CSV 경로\n"
+                             "미지정 시 data/signals/base_signals_log.csv 사용 (BTC_USDT val+test)\n"
+                             "다른 코인 예: data/signals/ETH_USDT_signals_log.csv")
     parser.add_argument("--mutation-scale-start", type=float, default=1.0,
                         help="초기 변이 폭 스케일 (1.0=최대, 세대마다 0.1 감소, 최소 0.3)")
     parser.add_argument("--disable-parent-gate", action="store_true",

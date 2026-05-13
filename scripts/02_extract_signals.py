@@ -333,17 +333,22 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     results_df.to_csv(out_path, index=False)
     logger.info(f"✅ 1, 2차 모델 점수 로그가 저장되었습니다: {out_path}")
 
-    # RL 훈련용 표준 파일: test 구간만 추출 → base_signals_log.csv
+    # RL 훈련용 표준 파일: val+test 구간 합산 → base_signals_log.csv
+    # - val: 베이스 모델이 학습에 직접 사용하지 않은 OOS 구간 (조기종료 기준만 사용)
+    # - test: 완전 OOS 구간
+    # - train 구간 제외: 베이스 모델이 가중치를 업데이트한 in-sample이므로 신호가 과적합될 우려
     # BTC_USDT 기준 파일. 03_train_rl.py / 04_train_rl_batch.py의 기본 data-path와 일치.
     # 다른 코인은 {symbol}_signals_log.csv를 --data-path로 직접 지정하세요.
     _symbol_from_filename = output_filename.replace("_signals_log.csv", "")
     if _symbol_from_filename == "BTC_USDT":
-        rl_df = results_df[results_df['split'] == 'test'].copy()
+        rl_df = results_df[results_df['split'].isin(['val', 'test'])].copy()
         rl_path = os.path.join(output_dir, "base_signals_log.csv")
         rl_df.to_csv(rl_path, index=False)
+        val_cnt  = int((rl_df['split'] == 'val').sum())
+        test_cnt = int((rl_df['split'] == 'test').sum())
         logger.info(
-            f"✅ RL 훈련용 시그널 저장 (test only): {rl_path}  "
-            f"(rows={len(rl_df):,})"
+            f"✅ RL 훈련용 시그널 저장 (val+test): {rl_path}  "
+            f"(rows={len(rl_df):,}  val={val_cnt:,}  test={test_cnt:,})"
         )
     else:
         logger.info(
