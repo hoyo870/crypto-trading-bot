@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 import torch
@@ -8,6 +9,13 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from src.utils.platform_utils import get_optimal_workers, get_pin_memory
+
+# ── 시장 국면 경계 (prepare_expert_data / extract_signals 공통 사용) ─────────
+# Phase 0: Accumulation  2023-05-01 ~ 2023-10-15
+# Phase 1: Bull Run      2023-10-16 ~ 2025-06-30  ← train 기준선
+# Phase 2: Bear / Crash  2025-07-01 ~
+_PHASE_BULL_END = pd.Timestamp('2025-06-30 23:59:00')
+_PHASE_VAL_END  = pd.Timestamp('2025-10-31 23:59:00')
 
 # ─────────────────────────────────────────────────────────────
 # 1. 시계열 커스텀 데이터셋 (연속성 보장 구조로 개선)
@@ -113,10 +121,16 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     df = pd.merge(df, df_raw[['timestamp', 'open', 'high', 'low', 'close', 'volume']], on='timestamp', suffixes=('', '_raw'))
 
     # 피처 스케일링
+    # quantile 경계: Phase 0+1 (train 기간 = ~ 2025-06-30)만으로 산출해 look-ahead 방지.
     price_cols = ['open', 'high', 'low', 'close']
+    _dt_for_cutoff = pd.to_datetime(df['datetime'])
+    train_cutoff = int((_dt_for_cutoff <= _PHASE_BULL_END).sum())
+    if train_cutoff == 0:  # fallback: 전체 raw 데이터가 bear 기간만 있는 경우
+        train_cutoff = int(len(df) * 0.70)
     for col in price_cols:
         df[col] = df[f'{col}_raw'].pct_change().fillna(0)
-        q_lo, q_hi = df[col].quantile(0.001), df[col].quantile(0.999)
+        q_lo = df[col].iloc[:train_cutoff].quantile(0.001)
+        q_hi = df[col].iloc[:train_cutoff].quantile(0.999)
         df[col] = df[col].clip(q_lo, q_hi)
     
     vol_ma = df['volume_raw'].rolling(24).mean() + 1e-9
@@ -170,9 +184,11 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     df.drop(columns=drop_cols, inplace=True)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
+    df.reset_index(drop=True, inplace=True)  # dropna 후 인덱스 정합성 보장
 
     price_vol_cols = price_cols + vol_col
-    exclude_cols = ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200']
+    # market_phase: split 메타 컬럼이므로 모델 입력에서 제외
+    exclude_cols = ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200', 'market_phase']
     context_cols = [c for c in df.columns if c not in price_vol_cols + exclude_cols]
 
     if expert_type in ['long', 'short']:
@@ -182,17 +198,23 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
         
     targets = df['Target'].values.astype(np.float32)
 
-    # ── 시계열을 유지하는 인덱스 기반 분할/다운샘플링 ──
-    # LSTM 생성을 위해 유효한 최소 인덱스는 seq_length 부터 시작합니다.
-    total_valid_indices = np.arange(seq_length, len(features))
-    
-    train_end_idx = int(len(total_valid_indices) * 0.70)
-    val_end_idx = int(len(total_valid_indices) * 0.85)
+    # ── 시장 국면 기반 인덱스 분할 ──────────────────────────────────────────
+    # Phase 0+1 (~ 2025-06-30) → train
+    # Phase 2 early (2025-07-01 ~ 2025-10-31) → val
+    # Phase 2 late  (2025-11-01 ~)             → test
+    # 경계에서 seq_length 간격을 둬 윈도우 겹침에 의한 누출을 방지합니다.
+    _dt = pd.to_datetime(df['datetime'])
+    _bull_end_pos = int((_dt <= _PHASE_BULL_END).sum())
+    _val_end_pos  = int((_dt <= _PHASE_VAL_END).sum())
 
-    raw_train_indices = total_valid_indices[:train_end_idx]
-    # Train/Validation/Test 경계에서 윈도우 중첩을 피하기 위해 seq_length 간격을 둡니다.
-    raw_val_indices = total_valid_indices[train_end_idx + seq_length : val_end_idx]
-    raw_test_indices = total_valid_indices[val_end_idx + seq_length :]
+    total_valid_indices = np.arange(seq_length, len(features))
+
+    raw_train_indices = total_valid_indices[total_valid_indices < _bull_end_pos]
+    raw_val_indices   = total_valid_indices[
+        (total_valid_indices >= _bull_end_pos + seq_length) &
+        (total_valid_indices <  _val_end_pos)
+    ]
+    raw_test_indices  = total_valid_indices[total_valid_indices >= _val_end_pos + seq_length]
 
     # 다운샘플링 헬퍼 함수
     def get_balanced_indices(indices, target_array):
@@ -234,6 +256,16 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
                               pin_memory=get_pin_memory(),
                               persistent_workers=(get_optimal_workers() > 0))
 
-    print(f"[INFO] 🎯 시계열 유지 다운샘플링 및 분할 완료 (Train: {len(train_indices):,}, Val: {len(val_indices):,})")
-    
-    return train_loader, val_loader, test_loader, features.shape[1]
+    # 훈련 데이터 양성 비율(다운샘플링 이전 raw 기준) → Focal Loss alpha 계산에 사용
+    _raw_train_targets = targets[raw_train_indices]
+    _n_pos = float((_raw_train_targets == 1.0).sum())
+    _n_neg = float((_raw_train_targets == 0.0).sum())
+    pos_weight_raw = _n_neg / (_n_pos + 1e-8)  # neg/pos 비율; 1보다 크면 양성 희소
+    print(
+        f"[INFO] 🎯 시계열 유지 다운샘플링 및 분할 완료 "
+        f"(Train: {len(train_indices):,}, Val: {len(val_indices):,}) "
+        f"| raw pos_weight={pos_weight_raw:.2f} "
+        f"(pos={int(_n_pos):,} neg={int(_n_neg):,})"
+    )
+
+    return train_loader, val_loader, test_loader, features.shape[1], pos_weight_raw

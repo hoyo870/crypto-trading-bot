@@ -61,6 +61,8 @@ def run_parallel_orchestrator(args):
     logger.info(f"🚀 [병렬 훈련 오케스트레이터 가동]")
     logger.info(f"총 {total_tasks}개의 훈련 그룹이 큐(Queue)에 등록되었습니다.")
     logger.info(f"그룹당 시드(모델) 수: {args.count_per_task}개 | 동시 실행(코어) 수: {args.jobs}개")
+    for lev, prof in tasks:
+        logger.info(f"  - 레버리지: {lev}x | 프로파일: {prof}")
     logger.info(f"{'='*65}\n")
     
     start_time = time.time()
