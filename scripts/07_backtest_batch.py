@@ -89,7 +89,10 @@ def _run_one(tag: str, model_dir: str, data_path: str,
         "--tuning-profile", tuning_profile,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
+                                env=env, timeout=600)
         if result.returncode != 0:
             return tag, False, result.stderr.strip().splitlines()[-1]
         return tag, True, None
@@ -173,7 +176,8 @@ def run_backtest_batch(tags: list, model_dir: str, data_path: str,
     if os.path.exists(tags_file):
         rank_cmd += ["--tags-file", tags_file]
 
-    result = subprocess.run(rank_cmd, capture_output=False, text=True)
+    result = subprocess.run(rank_cmd, capture_output=False, text=True, encoding='utf-8',
+                            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     if result.returncode != 0:
         logger.error(f"랭킹 산출 실패 (code={result.returncode})")
     else:
