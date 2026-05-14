@@ -158,9 +158,10 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
                     break
 
     except KeyboardInterrupt:
+        _interrupted_epoch = locals().get('epoch', -1)
         logger.warning(
             f"[⚠️ INTERRUPTED] {expert_type.upper()} 훈련 중단됨 "
-            f"(Epoch {epoch+1}). 현재까지 최고 모델을 저장합니다."
+            f"(Epoch {_interrupted_epoch+1}). 현재까지 최고 모델을 저장합니다."
         )
 
     # 최고 모델 저장

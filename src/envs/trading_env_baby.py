@@ -154,8 +154,9 @@ class BabyLeverageTradingEnv(gym.Env):
             # 외부에서 명시적으로 지정한 경우 (백테스트 등)
             self.start_step = int(options['start_step'])
         else:
-            # mode 기반 구간으로 랜덤 시작점 제한 (Train/Eval 갩리)
-            available_hi = self._step_hi - MIN_EP_STEPS
+            # mode 기반 구간으로 랜덤 시작점 제한 (Train/Eval 분리)
+            # MAX_EP_STEPS 여백 확보: 에피소드가 _step_hi를 초과하지 않도록 보정
+            available_hi = self._step_hi - MAX_EP_STEPS
             lo = max(self._step_lo, 0)
             hi = max(lo, available_hi)
             self.start_step = int(self.np_random.integers(lo, hi + 1))

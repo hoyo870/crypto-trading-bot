@@ -201,7 +201,8 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     if _q_cutoff == 0:
         _q_cutoff = int(len(df) * 0.70)
     for col in price_cols:
-        df[col] = df[f'{col}_raw'].pct_change().fillna(0)
+        # base_models.py와 동일한 변환: log return (train-inference 일관성)
+        df[col] = np.log(df[f'{col}_raw'] / df[f'{col}_raw'].shift(1)).fillna(0)
         q_lo = df[col].iloc[:_q_cutoff].quantile(0.001)
         q_hi = df[col].iloc[:_q_cutoff].quantile(0.999)
         df[col] = df[col].clip(q_lo, q_hi)
