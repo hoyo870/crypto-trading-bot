@@ -78,11 +78,13 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     # 손실 함수: long/short는 FocalLoss(alpha=pos_weight, gamma=2.0), context는 BCELoss
     # Focal Loss는 희소한 양성 클래스(long 신호 등)를 더 강하게 학습해 출력 범위를 확장합니다.
     if expert_type in ['long', 'short']:
-        # 훈련 데이터는 get_balanced_indices로 이미 1:1 균형이 맞춰져 있음.
-        # alpha=1.0 (symmetric): 클래스 재가중 없이 hard example에만 집중 (gamma=2).
-        # alpha > 1 을 balanced data에 적용하면 양성 과다 가중 → all-ones 수렴.
-        criterion = FocalLoss(alpha=1.0, gamma=2.0)
-        logger.info(f"  손실함수: FocalLoss(alpha=1.00, gamma=2.0) | raw pos_weight={pos_weight:.2f} (downsampled → balanced)")
+        # 1:3 capped 후에도 자연 neg:pos 비율(≈2:1)이 그대로 남아 alpha=1.0이면
+        # 모델이 항상 "신호 없음"만 예측하는 all-zero collapse에 빠짐.
+        # → alpha = pos_weight(neg/pos 비율)로 양성 클래스에 가중치 부여.
+        # clamp 4.0: 극단적 alpha는 all-ones 수렴 위험이 있으므로 상한 고정.
+        focal_alpha = min(float(pos_weight), 4.0)
+        criterion = FocalLoss(alpha=focal_alpha, gamma=2.0)
+        logger.info(f"  손실함수: FocalLoss(alpha={focal_alpha:.2f}, gamma=2.0) | raw pos_weight={pos_weight:.2f} (1:3 capped, alpha=pos_weight)")
     else:
         criterion = nn.BCELoss()
         logger.info(f"  손실함수: BCELoss | raw pos_weight={pos_weight:.2f}")

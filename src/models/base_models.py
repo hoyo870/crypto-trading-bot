@@ -128,7 +128,8 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     if train_cutoff == 0:  # fallback: 전체 raw 데이터가 bear 기간만 있는 경우
         train_cutoff = int(len(df) * 0.70)
     for col in price_cols:
-        df[col] = df[f'{col}_raw'].pct_change().fillna(0)
+        # Log Return: 신경망에 더 적합한 대칭 분포, pct_change 대비 극값 압축 효과
+        df[col] = np.log(df[f'{col}_raw'] / df[f'{col}_raw'].shift(1)).fillna(0)
         q_lo = df[col].iloc[:train_cutoff].quantile(0.001)
         q_hi = df[col].iloc[:train_cutoff].quantile(0.999)
         df[col] = df[col].clip(q_lo, q_hi)
@@ -145,25 +146,42 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     df['pat_morningstar'] = talib.CDLMORNINGSTAR(o, h, l, c) / 100.0
     df['pat_eveningstar'] = talib.CDLEVENINGSTAR(o, h, l, c) / 100.0
     
-    # ── 정답지(Label) 생성 로직 ──
+    # ── 정답지(Label) 생성 로직 (ATR 기반 동적 임계치) ──
     horizon = 72
-    tp_thresh = 1.4  
-    sl_thresh = 0.7  
+    TP_MULT = 2.0   # ATR 배수: TP = 2.0 × ATR%
+    SL_MULT = 1.0   # ATR 배수: SL = 1.0 × ATR%
+    MIN_TP  = 0.5   # 최소 TP (%) — 변동성 극저점 방어
+    MIN_SL  = 0.25  # 최소 SL (%) — 변동성 극저점 방어
+
+    # 14주기 ATR 계산 및 가격 대비 비율(%)로 변환
+    # h, l, c 는 위 캔들 패턴 블록에서 이미 df['*_raw'].values 로 정의됨
     close_prices = df['close_raw'].values
     n = len(close_prices)
-    targets = np.zeros(n, dtype=np.float32) 
+    _atr_abs = talib.ATR(h, l, close_prices, timeperiod=14)
+    _atr_pct  = np.where(close_prices > 0,
+                         _atr_abs / close_prices * 100.0,
+                         np.nan)
+    # NaN(초기 14봉 warm-up 구간) → 전체 중앙값으로 fallback
+    _atr_median = float(np.nanmedian(_atr_pct))
+    _atr_pct = np.where(np.isnan(_atr_pct), _atr_median, _atr_pct)
+
+    targets = np.zeros(n, dtype=np.float32)
 
     for i in range(n - horizon):
+        # 시점별 동적 임계치
+        tp_thresh = max(MIN_TP, TP_MULT * _atr_pct[i])
+        sl_thresh = max(MIN_SL, SL_MULT * _atr_pct[i])
+
         curr_p = close_prices[i]
         future_window = close_prices[i+1: i+1+horizon]
         ret = (future_window - curr_p) / curr_p * 100
-        
+
         hit_tp_long = np.where(ret >= tp_thresh)[0]
         hit_sl_long = np.where(ret <= -sl_thresh)[0]
         idx_tp_long = hit_tp_long[0] if len(hit_tp_long) > 0 else horizon + 1
         idx_sl_long = hit_sl_long[0] if len(hit_sl_long) > 0 else horizon + 1
         is_long = (idx_tp_long < idx_sl_long) and (idx_tp_long <= horizon)
-        
+
         hit_tp_short = np.where(ret <= -tp_thresh)[0]
         hit_sl_short = np.where(ret >= sl_thresh)[0]
         idx_tp_short = hit_tp_short[0] if len(hit_tp_short) > 0 else horizon + 1
@@ -209,34 +227,40 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
 
     total_valid_indices = np.arange(seq_length, len(features))
 
-    raw_train_indices = total_valid_indices[total_valid_indices < _bull_end_pos]
-    raw_val_indices   = total_valid_indices[
-        (total_valid_indices >= _bull_end_pos + seq_length) &
-        (total_valid_indices <  _val_end_pos)
+    # horizon 여백 추가: 경계 근처 타겟이 반대편 구간 가격을 참조하는 것을 완전 차단
+    raw_train_indices = total_valid_indices[
+        total_valid_indices < _bull_end_pos - horizon
     ]
-    raw_test_indices  = total_valid_indices[total_valid_indices >= _val_end_pos + seq_length]
+    raw_val_indices   = total_valid_indices[
+        (total_valid_indices >= _bull_end_pos + seq_length + horizon) &
+        (total_valid_indices <  _val_end_pos - horizon)
+    ]
+    raw_test_indices  = total_valid_indices[
+        total_valid_indices >= _val_end_pos + seq_length + horizon
+    ]
 
-    # 다운샘플링 헬퍼 함수
-    def get_balanced_indices(indices, target_array):
+    # 언더샘플링 헬퍼: 강제 1:1 제거 → 최대 1:3 비율만 제한
+    # Focal Loss 가 Loss 단에서 클래스 불균형을 처리하므로 여기선 극단적 편향만 방어
+    MAX_NEG_RATIO = 3  # Pos 1 : Neg 최대 3
+
+    def get_capped_indices(indices, target_array):
         sub_targets = target_array[indices]
         pos_idx = indices[np.where(sub_targets == 1.0)[0]]
         neg_idx = indices[np.where(sub_targets == 0.0)[0]]
-        
-        min_len = min(len(pos_idx), len(neg_idx))
-        if min_len == 0:
-            return indices  # 한쪽 클래스가 비어 있으면 원본 인덱스를 그대로 사용
-            
-        rng = np.random.default_rng(42)
-        pos_idx_sampled = rng.choice(pos_idx, size=min_len, replace=False)
-        neg_idx_sampled = rng.choice(neg_idx, size=min_len, replace=False)
-        
-        balanced_indices = np.sort(np.concatenate([pos_idx_sampled, neg_idx_sampled]))
-        return balanced_indices
 
-    # 현재 구현은 Train/Val/Test 모두 동일한 1:1 밸런싱 규칙을 적용합니다.
-    train_indices = get_balanced_indices(raw_train_indices, targets)
-    val_indices = get_balanced_indices(raw_val_indices, targets)
-    test_indices = get_balanced_indices(raw_test_indices, targets)
+        if len(pos_idx) == 0 or len(neg_idx) == 0:
+            return indices  # 한쪽 클래스가 비어 있으면 원본 그대로
+
+        max_neg = len(pos_idx) * MAX_NEG_RATIO
+        if len(neg_idx) > max_neg:
+            rng = np.random.default_rng(42)
+            neg_idx = rng.choice(neg_idx, size=max_neg, replace=False)
+
+        return np.sort(np.concatenate([pos_idx, neg_idx]))
+
+    train_indices = get_capped_indices(raw_train_indices, targets)
+    val_indices   = get_capped_indices(raw_val_indices,   targets)
+    test_indices  = get_capped_indices(raw_test_indices,  targets)
 
     # 전체 배열(features, targets)은 자르지 않고 그대로 Dataset에 넘김 (인덱스만 전달)
     train_dataset = CryptoExpertDataset(features, targets, seq_length, train_indices)
@@ -262,7 +286,8 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     _n_neg = float((_raw_train_targets == 0.0).sum())
     pos_weight_raw = _n_neg / (_n_pos + 1e-8)  # neg/pos 비율; 1보다 크면 양성 희소
     print(
-        f"[INFO] 🎯 시계열 유지 다운샘플링 및 분할 완료 "
+        f"[INFO] 🎯 시계열 유지 분할 완료 "
+        f"(ATR 동적 임계치 | max_neg_ratio=1:{MAX_NEG_RATIO} | log_return) "
         f"(Train: {len(train_indices):,}, Val: {len(val_indices):,}) "
         f"| raw pos_weight={pos_weight_raw:.2f} "
         f"(pos={int(_n_pos):,} neg={int(_n_neg):,})"
