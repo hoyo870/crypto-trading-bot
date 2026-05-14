@@ -87,16 +87,17 @@ def run_parallel_orchestrator(args):
             
             if args.load_model:
                 cmd.extend(["--load-model", args.load_model])
+            cmd.extend(["--n-envs", str(args.n_envs)])
                 
             logger.info(f"▶️ [START] 레버리지: {lev}x | 프로파일: {prof:<10} | 시드 투입: {args.count_per_task}개")
             
             # 환경변수 상속 및 프로세스 실행
-            # 병렬 프로세스 수에 따라 OMP/MKL 스레드 수 분배 (코어 경합 방지)
-            _cpu_per_job = max(1, (os.cpu_count() or 4) // args.jobs)
+            # 소형 MLP [256,256,128]: 멀티스레드 BLAS는 동기화 오버헤드 > 병렬 이득
+            # 벤치마크: 1 thread=676 iter/s, 20 threads=307 iter/s (2.2x 느림)
             env_vars = os.environ.copy()
             env_vars["PYTHONIOENCODING"] = "utf-8"
-            env_vars["OMP_NUM_THREADS"]  = str(_cpu_per_job)
-            env_vars["MKL_NUM_THREADS"]  = str(_cpu_per_job)
+            env_vars["OMP_NUM_THREADS"]  = "1"
+            env_vars["MKL_NUM_THREADS"]  = "1"
             
             proc = subprocess.Popen(cmd, 
                 env=env_vars, 
@@ -149,6 +150,8 @@ if __name__ == "__main__":
     parser.add_argument("--model-dir", type=str, default=os.path.join("checkpoints", "rl_generations"))
     parser.add_argument("--log-dir", type=str, default=os.path.join("logs", "train"))
     parser.add_argument("--load-model", type=str, default=None, help="(파인튜닝용) 부모 모델 zip 경로")
+    parser.add_argument("--n-envs", type=int, default=4,
+                        help="DummyVecEnv 병렬 환경 수 (기본=4). CPU 소형 MLP 최적값.")
     
     args = parser.parse_args()
     

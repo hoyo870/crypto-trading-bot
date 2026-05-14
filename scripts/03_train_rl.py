@@ -21,6 +21,7 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 # ── 경로 설정 ──────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -139,15 +140,27 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
               data_path, model_dir, log_dir,
               total_timesteps, eval_freq, patience, reward_target,
               entropy_threshold, no_improve_start_ratio,
-              mutation_scale=1.0):
+              mutation_scale=1.0, n_envs=1):
     """seed 1개에 대한 PPO 훈련을 수행하고 저장합니다."""
     start = time.time()
-    logger.info(f"  ▶ [{model_tag}] seed={seed} | lev={leverage}x | profile={tuning_profile}")
+    logger.info(f"  ▶ [{model_tag}] seed={seed} | lev={leverage}x | profile={tuning_profile} | n_envs={n_envs}")
 
-    train_env = Monitor(LeverageTradingEnv(data_path=data_path, leverage=leverage, mode="train"))
-    eval_env  = Monitor(LeverageTradingEnv(data_path=data_path, leverage=leverage, mode="eval"))
+    # hp는 항상 복사본 사용 (프로파일 원본 변경 방지)
+    hp = dict(PPO_TUNING_PROFILES[tuning_profile])
 
-    hp = PPO_TUNING_PROFILES[tuning_profile]
+    if n_envs > 1:
+        # DummyVecEnv: 동일 프로세스 내 N개 환경을 배치 처리
+        # 롤아웃 inference가 batch=N으로 묶여 Python 오버헤드 대폭 감소
+        def _make_train_env():
+            return Monitor(LeverageTradingEnv(data_path=data_path, leverage=leverage, mode="train"))
+        train_env = DummyVecEnv([_make_train_env] * n_envs)
+        # n_steps를 n_envs로 나눠 유효 롤아웃 버퍼 크기를 동일하게 유지
+        hp["n_steps"] = max(64, hp["n_steps"] // n_envs)
+        logger.info(f"    DummyVecEnv: n_envs={n_envs}, n_steps(per env)={hp['n_steps']}")
+    else:
+        train_env = Monitor(LeverageTradingEnv(data_path=data_path, leverage=leverage, mode="train"))
+
+    eval_env = Monitor(LeverageTradingEnv(data_path=data_path, leverage=leverage, mode="eval"))
 
     if load_model_path and os.path.exists(load_model_path):
         logger.info(f"    부모 모델 로드: {load_model_path}")
@@ -197,6 +210,7 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
                 "learning_rate": mutated_lr,
                 "vf_coef":       mutated_vf,
                 "clip_range":    mutated_clip,
+                "n_steps":       hp["n_steps"],  # n_envs 조정 반영
             }
         )
 
@@ -277,6 +291,7 @@ def run_train_batch(args):
             entropy_threshold=args.entropy_threshold,
             no_improve_start_ratio=args.no_improve_start_ratio,
             mutation_scale=args.mutation_scale,
+            n_envs=args.n_envs,
         )
         tags_created.append(tag)
         total_elapsed = int(time.time() - batch_start)
@@ -322,6 +337,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-improve-start-ratio", type=float, default=0.1)
     parser.add_argument("--mutation-scale", type=float, default=1.0,
                         help="변이 폭 스케일 (1.0=최대, 0.0=변이 없음; run_evolution.py가 세대별 자동 조정)")
+    parser.add_argument("--n-envs", type=int, default=4,
+                        help="DummyVecEnv 병렬 환경 수 (기본=4). 1=단일 환경.\n"
+                             "n_steps를 n_envs로 나눠 유효 버퍼 크기를 유지합니다.")
 
     default_data  = os.path.join(ROOT_DIR, "data", "signals", "base_signals_log.csv")
     default_model = os.path.join(ROOT_DIR, "checkpoints", "rl_generations")
