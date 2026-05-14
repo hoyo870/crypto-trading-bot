@@ -47,10 +47,42 @@ class BabyLeverageTradingEnv(gym.Env):
     """
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, data_path, initial_balance=10000.0,
+    def __init__(self, data_path=None, initial_balance=10000.0,
                  fee_rate=0.0005, leverage=DEFAULT_LEVERAGE,
-                 mode=None, tuning_profile="balanced"):
+                 mode=None, tuning_profile="balanced",
+                 df=None, train_ratio=0.7, eval_ratio=0.3):
         super().__init__()
+
+        # ── 데이터 로드 (df 우선, 없으면 data_path 에서 CSV 로드) ─────────
+        if df is None:
+            if data_path is None:
+                raise ValueError(
+                    "[BabyEnv] data_path 또는 df 중 하나는 반드시 제공해야 합니다."
+                )
+            df = pd.read_csv(data_path)
+
+        # ── 분할 비율 검증 ─────────────────────────────────────────────────
+        if not (0.0 < train_ratio <= 1.0):
+            raise ValueError(
+                f"[BabyEnv] train_ratio 는 (0, 1] 범위여야 합니다. 입력값: {train_ratio}"
+            )
+        if not (0.0 < eval_ratio <= 1.0):
+            raise ValueError(
+                f"[BabyEnv] eval_ratio 는 (0, 1] 범위여야 합니다. 입력값: {eval_ratio}"
+            )
+        if train_ratio + eval_ratio > 1.0 + 1e-9:
+            raise ValueError(
+                f"[BabyEnv] train_ratio + eval_ratio <= 1.0 이어야 합니다. "
+                f"입력값: {train_ratio} + {eval_ratio} = {train_ratio + eval_ratio:.4f}"
+            )
+
+        n = len(df)
+        # ── 데이터 최소 길이 검증 ──────────────────────────────────────────
+        if n < MIN_EP_STEPS * 2:
+            raise ValueError(
+                f"[BabyEnv] 데이터가 너무 짧습니다 (n={n}, 최소 {MIN_EP_STEPS * 2}행 필요)."
+            )
+
         self.initial_balance = initial_balance
         self.fee_rate = fee_rate
         self.leverage = float(leverage)
@@ -65,22 +97,33 @@ class BabyLeverageTradingEnv(gym.Env):
         self.tuning_profile = tuning_profile
         self.mode = mode  # "train" | "eval" | None
 
+        data_source = f"path={data_path}" if data_path else "df=<provided>"
         print(f"[INFO] BabyLeverageTradingEnv v1 lev={int(self.leverage)}x  "
               f"liq_at={1/self.leverage*100:.0f}%raw  "
               f"max_hold={self.max_hold_steps}bars  "
-              f"LIQ_PENALTY={LIQ_PENALTY}  mode={mode or 'full'}  profile={self.tuning_profile}(ignored)")
+              f"LIQ_PENALTY={LIQ_PENALTY}  mode={mode or 'full'}  "
+              f"split={train_ratio}/{eval_ratio}  {data_source}")
 
-        df = pd.read_csv(data_path)
-        self.max_steps = len(df) - 1
+        self.max_steps = n - 1
 
-        # ── Train/Eval 데이터 구간 분리 (70% / 30%) ──────────────────────
-        n = self.max_steps + 1
+        # ── Train/Eval 데이터 구간 분리 ───────────────────────────────────
         if mode == "train":
             self._step_lo = 0
-            self._step_hi = int(n * 0.7)
+            self._step_hi = int(n * train_ratio)
         elif mode == "eval":
-            self._step_lo = int(n * 0.7)
-            self._step_hi = n
+            self._step_lo = int(n * train_ratio)
+            self._step_hi = int(n * (train_ratio + eval_ratio))
+            # eval 구간 최소 길이 검증
+            eval_size = self._step_hi - self._step_lo
+            if eval_size < MIN_EP_STEPS:
+                warnings.warn(
+                    f"[BabyEnv] eval 구간이 너무 짧습니다 "
+                    f"({eval_size}행 < MIN_EP_STEPS={MIN_EP_STEPS}). "
+                    f"전체 구간으로 fallback합니다.",
+                    UserWarning,
+                )
+                self._step_lo = 0
+                self._step_hi = n
         else:  # None: 백테스트 등 전체 구간 사용
             self._step_lo = 0
             self._step_hi = n

@@ -14,7 +14,10 @@ import random
 import time
 import argparse
 import gc
+import csv
 import logging
+
+import pandas as pd
 
 import numpy as np
 import torch
@@ -135,6 +138,194 @@ class SmartStopCallback(BaseCallback):
         return True
 
 
+# ── CustomEvalCallback 헬퍼 ──────────────────────────────────────────────
+def _safe_mean(infos: list, key: str) -> float:
+    """info dict 목록에서 특정 key 평균을 안전하게 반환합니다."""
+    vals = []
+    for info in infos:
+        v = info.get(key)
+        if v is not None:
+            try:
+                vals.append(float(v))
+            except (TypeError, ValueError):
+                pass
+    return float(np.mean(vals)) if vals else 0.0
+
+
+_EVAL_CSV_FIELDS = [
+    "step", "score", "mean_reward", "std_reward", "min_reward",
+    "final_balance", "win_rate", "total_trades", "liquidation_count",
+]
+
+
+def _write_eval_metrics(path: str, **kwargs) -> None:
+    """eval_metrics.csv 에 한 행을 안전하게 누적 저장합니다."""
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        write_header = not os.path.exists(path)
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=_EVAL_CSV_FIELDS,
+                                    extrasaction="ignore")
+            if write_header:
+                writer.writeheader()
+            row = {
+                k: (round(float(v), 6) if isinstance(v, float) else v)
+                for k, v in kwargs.items()
+            }
+            writer.writerow(row)
+    except Exception as exc:
+        logger.warning(f"[CustomEval] eval_metrics.csv 저장 실패 (무시): {exc}")
+
+
+# ── CustomEvalCallback ─────────────────────────────────────────────────────
+class CustomEvalCallback(EvalCallback):
+    """
+    안정성 기반 스코어링으로 best_model.zip 승격 기준을 강화한 EvalCallback.
+
+    승격 조건 (단순 max(mean_reward) 대신):
+        stability_score = mean_reward - (std_reward × 0.5) + (min_reward × 0.2)
+
+    추가 기능:
+    - 매 평가마다 <model_dir>/eval_metrics.csv 에 실전 지표 누적 저장
+    - SmartStopCallback 과 호환 (best_mean_reward 속성 유지)
+    """
+
+    def __init__(self, eval_env, best_model_save_path, log_path=None,
+                 eval_freq=10_000, n_eval_episodes=5,
+                 deterministic=True, render=False, verbose=1):
+        super().__init__(
+            eval_env=eval_env,
+            best_model_save_path=best_model_save_path,
+            log_path=log_path,
+            eval_freq=eval_freq,
+            n_eval_episodes=n_eval_episodes,
+            deterministic=deterministic,
+            render=render,
+            verbose=verbose,
+        )
+        self._best_score: float = -np.inf
+        self._metrics_path: str = os.path.join(
+            best_model_save_path, "eval_metrics.csv"
+        )
+
+    def _on_step(self) -> bool:
+        if self.eval_freq <= 0 or self.n_calls % self.eval_freq != 0:
+            return True
+
+        # ── 1. DummyVecEnv API 로 에피소드 직접 수집 ─────────────────────
+        episode_rewards, episode_infos = self._collect_eval_episodes()
+        if not episode_rewards:
+            logger.warning(
+                f"[CustomEval] 수집된 에피소드 없음 (step={self.num_timesteps}) — 평가 건너뜀"
+            )
+            return True
+
+        mean_reward = float(np.mean(episode_rewards))
+        std_reward  = float(np.std(episode_rewards))
+        min_reward  = float(np.min(episode_rewards))
+
+        # SmartStopCallback 호환: mean_reward 기준으로도 best_mean_reward 갱신
+        self.last_mean_reward = mean_reward
+        if mean_reward > self.best_mean_reward:
+            self.best_mean_reward = mean_reward
+
+        # ── 2. 안정성 스코어 ─────────────────────────────────────────────
+        # 단순 max(mean) 대신: 변동성 패널티 + 최악 케이스 보정 반영
+        score = mean_reward - (std_reward * 0.5) + (min_reward * 0.2)
+
+        # ── 3. info 집계 (안전한 fallback) ───────────────────────────────
+        final_balance = _safe_mean(episode_infos, "final_balance")
+        win_rate      = _safe_mean(episode_infos, "win_rate")
+        total_trades  = _safe_mean(episode_infos, "total_trades")
+        liq_count     = sum(
+            1 for i in episode_infos if i.get("liquidated", False)
+        )
+
+        # ── 4. Best model 승격 (stability score 기준) ─────────────────────
+        if score > self._best_score:
+            self._best_score = score
+            if self.best_model_save_path is not None:
+                os.makedirs(self.best_model_save_path, exist_ok=True)
+                self.model.save(
+                    os.path.join(self.best_model_save_path, "best_model")
+                )
+            logger.info(
+                f"    [CustomEval] ✅ Best 갱신 "
+                f"(score={score:.4f} | mean={mean_reward:.3f} "
+                f"std={std_reward:.3f} min={min_reward:.3f} | "
+                f"bal={final_balance:.0f} wr={win_rate:.1f}% "
+                f"liq={liq_count}/{len(episode_rewards)})"
+            )
+        else:
+            logger.info(
+                f"    [CustomEval] score={score:.4f} ≤ best={self._best_score:.4f} "
+                f"(mean={mean_reward:.3f} std={std_reward:.3f})"
+            )
+
+        # ── 5. eval_metrics.csv 누적 저장 ────────────────────────────────
+        _write_eval_metrics(
+            path=self._metrics_path,
+            step=self.num_timesteps,
+            score=score,
+            mean_reward=mean_reward,
+            std_reward=std_reward,
+            min_reward=min_reward,
+            final_balance=final_balance,
+            win_rate=win_rate,
+            total_trades=int(total_trades),
+            liquidation_count=liq_count,
+        )
+        return True
+
+    def _collect_eval_episodes(self):
+        """
+        self.eval_env (DummyVecEnv 또는 원시 환경) 에서 n_eval_episodes 실행.
+        반환: (list[float] rewards, list[dict] infos)
+        """
+        rewards: list = []
+        infos: list   = []
+        n_envs = getattr(self.eval_env, "num_envs", 1)
+        current_rewards = np.zeros(n_envs)
+        # 무한루프 방지: 에피소드당 최대 30,000스텝 × n_eval_episodes
+        max_steps = self.n_eval_episodes * 30_000
+        ep_count = 0
+
+        try:
+            reset_out = self.eval_env.reset()
+            # gymnasium VecEnv 는 (obs, infos) 튜플, 구형은 obs만 반환
+            obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+
+            for _ in range(max_steps):
+                actions, _ = self.model.predict(
+                    obs, deterministic=self.deterministic
+                )
+                # SB3 VecEnv: (obs, rewards, dones, infos) 또는 5-tuple
+                step_out = self.eval_env.step(actions)
+                if len(step_out) == 5:
+                    obs, rews, terminateds, truncateds, ep_infos = step_out
+                    dones = np.logical_or(terminateds, truncateds)
+                else:
+                    obs, rews, dones, ep_infos = step_out
+                current_rewards += rews
+
+                for i, done in enumerate(dones):
+                    if done:
+                        rewards.append(float(current_rewards[i]))
+                        ep_info = (
+                            ep_infos[i]
+                            if i < len(ep_infos) and isinstance(ep_infos[i], dict)
+                            else {}
+                        )
+                        infos.append(ep_info)
+                        current_rewards[i] = 0.0
+                        ep_count += 1
+                        if ep_count >= self.n_eval_episodes:
+                            return rewards, infos
+        except Exception as exc:
+            logger.warning(f"[CustomEval] 에피소드 수집 오류: {exc}")
+        return rewards, infos
+
+
 # ── 단일 모델 훈련 ─────────────────────────────────────────────────────────
 def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
               data_path, model_dir, log_dir,
@@ -148,19 +339,29 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
     # hp는 항상 복사본 사용 (프로파일 원본 변경 방지)
     hp = dict(PPO_TUNING_PROFILES[tuning_profile])
 
+    # CSV 1회 로드 → 모든 환경(DummyVecEnv 포함) 에서 재사용 (중복 I/O 방지)
+    df_shared = pd.read_csv(data_path)
+    logger.info(f"    CSV 로드 완료: {data_path} ({len(df_shared)}행)")
+
     if n_envs > 1:
         # DummyVecEnv: 동일 프로세스 내 N개 환경을 배치 처리
         # 롤아웃 inference가 batch=N으로 묶여 Python 오버헤드 대폭 감소
         def _make_train_env():
-            return Monitor(LeverageTradingEnv(data_path=data_path, leverage=leverage, mode="train"))
+            return Monitor(
+                LeverageTradingEnv(df=df_shared, leverage=leverage, mode="train")
+            )
         train_env = DummyVecEnv([_make_train_env] * n_envs)
         # n_steps를 n_envs로 나눠 유효 롤아웃 버퍼 크기를 동일하게 유지
         hp["n_steps"] = max(64, hp["n_steps"] // n_envs)
         logger.info(f"    DummyVecEnv: n_envs={n_envs}, n_steps(per env)={hp['n_steps']}")
     else:
-        train_env = Monitor(LeverageTradingEnv(data_path=data_path, leverage=leverage, mode="train"))
+        train_env = Monitor(
+            LeverageTradingEnv(df=df_shared, leverage=leverage, mode="train")
+        )
 
-    eval_env = Monitor(LeverageTradingEnv(data_path=data_path, leverage=leverage, mode="eval"))
+    eval_env = Monitor(
+        LeverageTradingEnv(df=df_shared, leverage=leverage, mode="eval")
+    )
 
     if load_model_path and os.path.exists(load_model_path):
         logger.info(f"    부모 모델 로드: {load_model_path}")
@@ -226,7 +427,7 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
         model = PPO("MlpPolicy", train_env, verbose=0, seed=seed,
                     tensorboard_log=log_dir, **hp)
 
-    eval_cb = EvalCallback(
+    eval_cb = CustomEvalCallback(
         eval_env,
         best_model_save_path=os.path.join(model_dir, model_tag),
         log_path=os.path.join(model_dir, model_tag, "results"),

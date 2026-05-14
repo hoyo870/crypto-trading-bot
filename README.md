@@ -166,9 +166,51 @@ python scripts/tools/clear_artifacts.py --targets logs,reports --yes
 
 - **Action Space**: `Discrete(6)` — 0=홀드, 1=롱Full, 2=롱Half, 3=숏Full, 4=숏Half, 5=청산
 - **Observation**: `Box(13,)` — long/short/context score, 포지션, 미실현 손익, 시간 피처, 레버리지, 홀드비율, DD
-- **Train/Eval 분리**: `mode="train"` → 전체 데이터의 앞 70% | `mode="eval"` → 뒤 30%
+- **Train/Eval 분리**: `mode="train"` → 앞 `train_ratio(기본 70%)` | `mode="eval"` → 뒤 `eval_ratio(기본 30%)`
+  - `df=None` + `data_path` 조합이 기본; `df=<DataFrame>` 전달 시 CSV 재로딩 스킵 (DummyVecEnv 다중 환경에서 I/O 1회)
+  - `train_ratio + eval_ratio > 1.0` 또는 eval 구간 < `MIN_EP_STEPS(10,000)` 이면 에러/fallback
 - **Max Episode**: 20,000 스텝 (~70일, 5분봉 기준)
 - **청산 벌점**: LIQ_PENALTY = 100.0 (커리큘럼 완화)
+
+---
+
+## 평가 파이프라인 (CustomEvalCallback)
+
+`scripts/03_train_rl.py` 의 `CustomEvalCallback` 은 기본 `EvalCallback` 을 대체합니다.
+
+### 승격 기준 (stability score)
+
+```
+score = mean_reward − (std_reward × 0.5) + (min_reward × 0.2)
+```
+
+단순 `max(mean_reward)` 대신 **변동성 패널티**(-) 와 **최악 케이스 보정**(+) 을 적용해,  
+한 번 운 좋게 튄 불안정한 모델이 `best_model.zip` 을 덮어쓰는 것을 방지합니다.  
+`SmartStopCallback` 은 `best_mean_reward` 속성을 통해 기존과 동일하게 동작합니다.
+
+### eval_metrics.csv
+
+모델 태그 폴더(`checkpoints/rl_generations/genN/<tag>/`) 에 매 평가 주기마다 누적 저장됩니다.
+
+| 컬럼 | 설명 |
+|------|------|
+| `step` | 학습 타임스텝 |
+| `score` | stability score |
+| `mean_reward` / `std_reward` / `min_reward` | 에피소드 보상 통계 |
+| `final_balance` | 에피소드 종료 잔고 평균 |
+| `win_rate` | 거래 승률(%) 평균 |
+| `total_trades` | 총 거래 횟수 평균 |
+| `liquidation_count` | 강제청산 발생 에피소드 수 |
+
+---
+
+## 2단계 학습 구조 (Baby → Full)
+
+1. **Gen1~N (Baby 환경)**: `BabyLeverageTradingEnv` 로 기본 롱/숏 방향 감지 습득
+   - 복잡 패널티 없음, 커리큘럼 완화 보상
+2. **파인튜닝 (Full 환경)**: `best_gen{N}.zip` 을 `--load-model` 로 `LeverageTradingEnv` 에 전달
+   - 변이 폭 자동 완화 (`mutation_scale × 0.5`) 로 기존 학습 보존
+   - `run_evolution.py --mutation-scale-start 0.8` 등으로 세대별 조정 가능
 
 ---
 
