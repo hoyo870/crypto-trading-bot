@@ -67,9 +67,10 @@ class LeverageTradingEnv(gym.Env):
     """
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, data_path, initial_balance=10000.0,
+    def __init__(self, data_path=None, initial_balance=10000.0,
                  fee_rate=0.0005, leverage=DEFAULT_LEVERAGE,
-                 mode=None, tuning_profile="balanced"):
+                 mode=None, tuning_profile="balanced",
+                 df=None, train_ratio=0.7, eval_ratio=0.3):
         super().__init__()
         self.initial_balance = initial_balance
         self.fee_rate = fee_rate
@@ -97,7 +98,24 @@ class LeverageTradingEnv(gym.Env):
               f"SafeLoss={SAFE_LOSS_THRESHOLD*100:.0f}%  "
               f"profile={self.tuning_profile}")
 
-        df = pd.read_csv(data_path)
+        # ── 데이터 로드 (df 우선, 없으면 data_path 에서 CSV 로드) ──────────
+        if df is None:
+            if data_path is None:
+                raise ValueError(
+                    "[LeverageTradingEnv] data_path 또는 df 중 하나는 반드시 제공해야 합니다."
+                )
+            df = pd.read_csv(data_path)
+        else:
+            df = df.reset_index(drop=True)
+
+        # mode 기반 데이터 분할 (df 전달 시에만 적용 — data_path 는 전구간 사용)
+        if df is not None and mode in ("train", "eval") and data_path is None:
+            n = len(df)
+            if mode == "train":
+                df = df.iloc[:int(n * train_ratio)].reset_index(drop=True)
+            else:  # eval
+                df = df.iloc[int(n * train_ratio):].reset_index(drop=True)
+
         self.max_steps = len(df) - 1
 
         self.closes = df['close'].values.astype(np.float32)
@@ -224,7 +242,7 @@ class LeverageTradingEnv(gym.Env):
         포지션 보유(±1) → 청산(5)와 hold(0)만 허용
         """
         mask = np.zeros(6, dtype=bool)
-        mask[0] = True  # hold 엸제나 유효
+        mask[0] = True  # hold 언제나 유효
         if self.position == 0:
             mask[1] = mask[2] = mask[3] = mask[4] = True  # 진입 액션
         else:
@@ -276,6 +294,7 @@ class LeverageTradingEnv(gym.Env):
 
         # ── 본절컷(Breakeven Stop) ─────────────────────────────────
         # 미실현 수익이 한번이라도 1% 이상 올랐다가 0 이하로 내려오면 강제 청산
+        _breakeven_triggered = False
         if (
             self.position != 0
             and self.peak_unrealized_profit >= BREAKEVEN_TRIGGER_PCT
@@ -284,9 +303,10 @@ class LeverageTradingEnv(gym.Env):
             current_raw_ret = self._calc_raw_ret(current_price)
             if current_raw_ret <= 0.0:
                 action = 5
+                _breakeven_triggered = True  # MIN_HOLD_STEPS 우회 플래그
 
-        # 최소 보유 전 청산 무효
-        if action == 5 and self.position != 0 and hold_steps < MIN_HOLD_STEPS:
+        # 최소 보유 전 청산 무효 (단, 본절컷 발동 시에는 MIN_HOLD 우회)
+        if action == 5 and self.position != 0 and hold_steps < MIN_HOLD_STEPS and not _breakeven_triggered:
             action = 0
             reward -= 0.02
 

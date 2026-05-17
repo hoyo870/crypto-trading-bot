@@ -34,10 +34,23 @@ ROOT_DIR   = os.path.dirname(SCRIPT_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-# 03_train_rl.py 에서 콜백/프로파일 재사용
-from scripts.train_rl_components import (  # noqa: E402 — fallback import
-    CustomEvalCallback, SmartStopCallback, PPO_TUNING_PROFILES,
-)
+# ── 03_train_rl.py 에서 콜백/프로파일 재사용 (module 레벨 안전 import) ─────
+# scripts/train_rl_components.py 가 없으므로 importlib 으로 03_train_rl.py 직접 로드
+try:
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "train_rl", os.path.join(os.path.dirname(__file__), "03_train_rl.py")
+    )
+    _train_rl_mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_train_rl_mod)
+    CustomEvalCallback  = _train_rl_mod.CustomEvalCallback
+    SmartStopCallback   = _train_rl_mod.SmartStopCallback
+    PPO_TUNING_PROFILES = _train_rl_mod.PPO_TUNING_PROFILES
+except Exception as _e:
+    raise ImportError(
+        f"03_train_rl.py 로드 실패: {_e}\n"
+        "scripts/03_train_rl.py 와 같은 디렉터리에 있는지 확인하세요."
+    ) from _e
 
 from src.envs.trading_env import LeverageTradingEnv  # noqa: E402
 
@@ -187,24 +200,7 @@ def _parse_args():
 
 
 if __name__ == "__main__":
-    # ── 콜백 import 경로 fallback ─────────────────────────────────────────
-    # 03_train_rl.py 에서 CustomEvalCallback 등을 직접 import
-    try:
-        from scripts.train_rl_components import (
-            CustomEvalCallback, SmartStopCallback, PPO_TUNING_PROFILES,
-        )
-    except ImportError:
-        # 03_train_rl.py 를 모듈로 직접 로드
-        import importlib.util
-        _spec = importlib.util.spec_from_file_location(
-            "train_rl", os.path.join(SCRIPT_DIR, "03_train_rl.py")
-        )
-        _mod = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-        CustomEvalCallback  = _mod.CustomEvalCallback   # noqa: F811
-        SmartStopCallback   = _mod.SmartStopCallback    # noqa: F811
-        PPO_TUNING_PROFILES = _mod.PPO_TUNING_PROFILES  # noqa: F811
-
+    # CustomEvalCallback 등은 모듈 레벨 importlib 로드로 이미 사용 가능
     args = _parse_args()
     finetune(
         baby_model_path=args.baby_model_path,

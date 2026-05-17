@@ -307,8 +307,22 @@ class CustomEvalCallback(EvalCallback):
             obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
 
             for _ in range(max_steps):
+                # ── MaskablePPO eval 마스킹 보장 ─────────────────────────
+                # Monitor(ActionMasker(env)) 또는 VecEnv 모두 처리
+                masks = None
+                try:
+                    if hasattr(self.eval_env, "env_method"):
+                        # DummyVecEnv 경로
+                        masks = np.array(self.eval_env.env_method("action_masks"))
+                    elif (hasattr(self.eval_env, "env")
+                          and hasattr(self.eval_env.env, "action_masks")):
+                        # Monitor(ActionMasker(...)) 단일 환경 경로
+                        masks = self.eval_env.env.action_masks()[None]  # (1, n_actions)
+                except Exception:
+                    masks = None  # 마스킹 미지원 환경은 graceful fallback
+
                 actions, _ = self.model.predict(
-                    obs, deterministic=self.deterministic
+                    obs, deterministic=self.deterministic, action_masks=masks
                 )
                 # SB3 VecEnv: (obs, rewards, dones, infos) 또는 5-tuple
                 step_out = self.eval_env.step(actions)
