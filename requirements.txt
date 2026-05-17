@@ -5,6 +5,7 @@ scikit-learn>=1.0.2
 joblib>=1.1.0
 matplotlib>=3.5.0
 tqdm>=4.64.0
+setuptools<81  # pkg_resources 포함 버전 (tensorboard 호환)
 
 # Technical Indicators
 # Windows: use prebuilt wheel package.
