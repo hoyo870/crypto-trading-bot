@@ -246,6 +246,20 @@ class BabyLeverageTradingEnv(gym.Env):
             position_size_norm,        # 12
         ], dtype=np.float32)
 
+    def action_masks(self) -> np.ndarray:
+        """ActionMasker 용: 현재 포지션에 따라 유효한 액션 마스크.
+
+        포지션 없음(0) -> 진입(1~4)만 허용, hold(0)는 항상 유효
+        포지션 보유(+-1) -> 청산(5)와 hold(0)만 허용
+        """
+        mask = np.zeros(6, dtype=bool)
+        mask[0] = True  # hold 언제나 유효
+        if self.position == 0:
+            mask[1] = mask[2] = mask[3] = mask[4] = True  # 진입 액션
+        else:
+            mask[5] = True  # 청산만
+        return mask
+
     # ── 스텝 ───────────────────────────────────────────────────────
     def step(self, action):
         i             = min(self.current_step, self.max_steps - 1)
