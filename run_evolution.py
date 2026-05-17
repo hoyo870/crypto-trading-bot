@@ -10,6 +10,7 @@
 """
 
 import os
+import re
 import sys
 import time
 import argparse
@@ -51,15 +52,43 @@ def _safe_tag_fragment(text: str) -> str:
     return "".join(cleaned).strip("_") or "parent"
 
 
+def _extract_original_tag(parent_path: str) -> str | None:
+    """
+    best_genX_lev2_bal_seed12345_001.zip 처럼 best_genX_ 접두사가 붙은 경로에서
+    원본 태그(lev2_bal_seed12345_001)를 추출합니다.
+    원본 태그가 없으면 None 반환.
+    """
+    stem = Path(parent_path).stem  # 확장자 제거
+    # best_genX_ 패턴 제거
+    m = re.match(r"^best_gen\d+_(.+)$", stem)
+    if m:
+        return m.group(1)
+    # lev로 시작하는 경우 그대로 사용
+    if re.match(r"^lev\d+_", stem):
+        return stem
+    return None
+
+
 def _inject_parent_candidate(parent_path: str, gen_str: str, gen_model_dir: str) -> str | None:
-    """부모 모델을 현재 세대 비교군으로 추가하고 tags.txt 에 등록합니다."""
+    """부모 모델을 현재 세대 비교군으로 추가하고 tags.txt 에 등록합니다.
+
+    원본 태그(lev{N}_{prof}_...) 정보를 보존하여 07_backtest_batch.py 가
+    정확한 레버리지와 프로파일을 추론할 수 있게 합니다.
+    """
     if not parent_path:
         return None
     if not os.path.isfile(parent_path):
         logger.warning(f"⚠️ [경고] --initial-parent 경로를 찾을 수 없어 비교군 추가를 건너뜁니다: {parent_path}")
         return None
 
-    stem = _safe_tag_fragment(Path(parent_path).stem)
+    # 원본 태그 추출 시도 (best_genX_lev... 패턴에서 lev... 부분만)
+    original_tag = _extract_original_tag(parent_path)
+    if original_tag:
+        # lev{N}_ 접두사가 살아있는 태그: parent_{gen_str}_lev{N}_{prof}_...
+        stem = _safe_tag_fragment(original_tag)
+    else:
+        stem = _safe_tag_fragment(Path(parent_path).stem)
+
     parent_tag = f"parent_{gen_str}_{stem}"
     parent_zip_path = os.path.join(gen_model_dir, f"{parent_tag}.zip")
 
@@ -338,16 +367,18 @@ def run_evolution_pipeline(args):
                     continue
                 logger.info(f"✅ [{gen_str}] 부모 비퇴보 게이트 통과: {gate_reason}")
 
-            # ✅ 2. 우승 모델 복사 로직
-            winner_dst = os.path.join(gen_model_dir, f"best_{gen_str}.zip")
+            # ✅ 2. 우승 모델 복사 로직 — 원본 태그를 파일명에 포함해 보존
+            # best_genX_lev{N}_{prof}_{seed}_{idx}.zip 형식으로 저장
+            winner_dst = os.path.join(gen_model_dir, f"best_{gen_str}_{best_tag}.zip")
             if os.path.exists(winner_source_path):
                 if os.path.abspath(winner_source_path) == os.path.abspath(winner_dst):
                     logger.info(f"ℹ️ [{gen_str}] 우승 모델 경로와 목적지가 동일하여 복사를 건너뜁니다.")
                 else:
                     shutil.copy2(winner_source_path, winner_dst)
                 logger.info(f"📂 [복사완료] 우승 모델이 {winner_dst} 로 복사(보존) 되었습니다.")
-                
-                # 다음 세대로 넘겨줄 경로를, 방금 예쁘게 복사한 best_gen.zip 으로 교체!
+                logger.info(f"🏷️  [태그 보존] 원본 태그 '{best_tag}' 가 파일명에 포함되어 다음 세대에서 레버리지/프로파일이 정확히 추론됩니다.")
+
+                # 다음 세대로 넘겨줄 경로를 원본 태그 포함된 best_genX_TAG.zip 으로 교체
                 parent_model_path = winner_dst
             else:
                 logger.error(f"❌ [{gen_str}] 우승 모델 파일을 찾지 못했습니다: {winner_source_path}")

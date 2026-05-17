@@ -17,6 +17,7 @@ LONG_IMBALANCE_THRESHOLD  = 0.55  # 롱 비율 임계치 (초과 시 롱 진입 
 SHORT_IMBALANCE_THRESHOLD = 0.45  # 숏 비율 임계치 (초과 시 숏 진입 패널티)
 IMBALANCE_PENALTY_COEF    = 1.0   # 롱/숏 편향 패널티 계수
 SAFE_LOSS_THRESHOLD    = 0.02  # 손절 안전/지옥 구간 경계 (net_ret 절댓값 기준)
+BREAKEVEN_TRIGGER_PCT  = 0.01  # 미실현 수익 1% 달성 후 수익이 0 이하로 회귀하면 강제 청산 (본절컷)
 
 # ── 포지션 사이징 ─────────────────────────────────────────────────
 # 액션: 0=hold, 1=long_full, 2=long_half, 3=short_full, 4=short_half, 5=close
@@ -216,6 +217,20 @@ class LeverageTradingEnv(gym.Env):
             position_size_norm,
         ], dtype=np.float32)
 
+    def action_masks(self) -> np.ndarray:
+        """ActionMasker 용: 현재 포지션에 따라 유효한 액션 마스크.
+
+        포지션 없음(0) → 진입(1~4)만 허용, hold(0)는 항상 유효
+        포지션 보유(±1) → 청산(5)와 hold(0)만 허용
+        """
+        mask = np.zeros(6, dtype=bool)
+        mask[0] = True  # hold 엸제나 유효
+        if self.position == 0:
+            mask[1] = mask[2] = mask[3] = mask[4] = True  # 진입 액션
+        else:
+            mask[5] = True  # 청산만
+        return mask
+
     def step(self, action):
         i             = min(self.current_step, self.max_steps - 1)
         current_price = self.closes[i]
@@ -258,6 +273,17 @@ class LeverageTradingEnv(gym.Env):
         # ── ② 최대 보유 도달 → 강제 청산 액션 ─────────────────────
         if self.position != 0 and hold_steps >= self.max_hold_steps:
             action = 5
+
+        # ── 본절컷(Breakeven Stop) ─────────────────────────────────
+        # 미실현 수익이 한번이라도 1% 이상 올랐다가 0 이하로 내려오면 강제 청산
+        if (
+            self.position != 0
+            and self.peak_unrealized_profit >= BREAKEVEN_TRIGGER_PCT
+            and action != 5  # 이미 청산 액션이 아닌 경우에만 강제
+        ):
+            current_raw_ret = self._calc_raw_ret(current_price)
+            if current_raw_ret <= 0.0:
+                action = 5
 
         # 최소 보유 전 청산 무효
         if action == 5 and self.position != 0 and hold_steps < MIN_HOLD_STEPS:
@@ -313,10 +339,16 @@ class LeverageTradingEnv(gym.Env):
 
         elif action == 5 and self.position != 0:             # 자발적 청산
             raw_ret = self._calc_raw_ret(current_price)
-            net_ret = self._close_position(raw_ret)  
+            net_ret = self._close_position(raw_ret)
 
             if net_ret >= 0:
                 reward += net_ret * 100.0
+                # ── 승률 가중 보너스 ─────────────────────────────────
+                # 이 에피소드에서 승률 > 50% 이면 보상 × 1.2
+                ep_win_rate = (self.win_trades / self.total_trades
+                               if self.total_trades > 0 else 0.0)
+                if ep_win_rate > 0.5:
+                    reward *= 1.2
             else:
                 abs_loss = abs(net_ret)
                 if abs_loss <= SAFE_LOSS_THRESHOLD:

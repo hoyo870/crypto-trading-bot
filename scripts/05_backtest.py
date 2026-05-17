@@ -29,7 +29,10 @@ import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings('ignore')
 
-from stable_baselines3 import PPO
+import re
+import numpy as np
+
+from sb3_contrib import MaskablePPO
 
 # ── 경로 설정 ──────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -62,8 +65,17 @@ if _custom_log_dir:
 
 # ── 유틸리티 ───────────────────────────────────────────────────────────────
 def _infer_leverage_from_tag(tag: str):
-    m = re.match(r"^lev(\d+)_", str(tag).strip().lower())
+    """태그 내 어디서든 lev(\\d+)_ 패턴을 탐색합니다 (parent_ 접두사 포함 대응)."""
+    m = re.search(r"lev(\d+)_", str(tag).strip().lower())
     return int(m.group(1)) if m else None
+
+
+def _infer_profile_from_tag(tag: str) -> str:
+    """태그 내 _stb_ / _bal_ / _agg_ 를 탐색해 tuning_profile 추론."""
+    t = str(tag).lower()
+    if "_stb" in t: return "stable"
+    if "_agg" in t: return "aggressive"
+    return "balanced"  # 기본값
 
 
 def _calc_mdd(balances):
@@ -116,8 +128,11 @@ def run_backtest(model_paths: list, tag: str, leverage: int,
     env = LeverageTradingEnv(data_path=data_path, leverage=leverage,
                              tuning_profile=tuning_profile)
 
-    models = [PPO.load(p) for p in model_paths]
+    models = [MaskablePPO.load(p) for p in model_paths]
     obs, _ = env.reset(options={"start_step": 0, "max_ep_steps": None})
+    # ── 전구간(Full Interval) 무결성 보장 ──────────────────────────────────
+    # max_ep_steps=None 으로 에피소드 길이 제한 없이 데이터 처음부터 끝까지 실행
+    assert env.max_episode_steps is None, "max_episode_steps 가 None 이어야 합니다"
 
     balances = [env.balance]
     liq_steps = []
@@ -130,7 +145,9 @@ def run_backtest(model_paths: list, tag: str, leverage: int,
         # 앙상블: 단순 다수결
         votes = []
         for m in models:
-            action, _ = m.predict(obs, deterministic=True)
+            # action_masks 메서드가 있으면 마스킹 적용
+            masks = env.action_masks() if hasattr(env, "action_masks") else None
+            action, _ = m.predict(obs, deterministic=True, action_masks=masks)
             votes.append(int(action) if np.ndim(action) == 0 else int(action[0]))
 
         if len(votes) == 1:

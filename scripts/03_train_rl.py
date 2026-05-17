@@ -21,7 +21,8 @@ import pandas as pd
 
 import numpy as np
 import torch
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -262,6 +263,16 @@ class CustomEvalCallback(EvalCallback):
                 f"(mean={mean_reward:.3f} std={std_reward:.3f})"
             )
 
+        # ── 5. eval_metrics.csv 누적 저장 이전에 Tensorboard 로깅 ──
+        try:
+            self.logger.record("eval/stability_score", score)
+            self.logger.record("eval/final_balance",   final_balance)
+            self.logger.record("eval/win_rate",        win_rate)
+            self.logger.record("eval/total_trades",    int(total_trades))
+            self.logger.dump(self.num_timesteps)
+        except Exception:
+            pass  # 로거 미초기화 시에도 안전하게 동작
+
         # ── 5. eval_metrics.csv 누적 저장 ────────────────────────────────
         _write_eval_metrics(
             path=self._metrics_path,
@@ -346,21 +357,23 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
     if n_envs > 1:
         # DummyVecEnv: 동일 프로세스 내 N개 환경을 배치 처리
         # 롤아웃 inference가 batch=N으로 묶여 Python 오버헤드 대폭 감소
+        def mask_fn(env): return env.action_masks()
         def _make_train_env():
-            return Monitor(
-                LeverageTradingEnv(df=df_shared, leverage=leverage, mode="train")
-            )
+            e = LeverageTradingEnv(df=df_shared, leverage=leverage, mode="train")
+            return Monitor(ActionMasker(e, mask_fn))
         train_env = DummyVecEnv([_make_train_env] * n_envs)
         # n_steps를 n_envs로 나눠 유효 롤아웃 버퍼 크기를 동일하게 유지
         hp["n_steps"] = max(64, hp["n_steps"] // n_envs)
         logger.info(f"    DummyVecEnv: n_envs={n_envs}, n_steps(per env)={hp['n_steps']}")
     else:
+        def mask_fn(env): return env.action_masks()
         train_env = Monitor(
-            LeverageTradingEnv(df=df_shared, leverage=leverage, mode="train")
+            ActionMasker(LeverageTradingEnv(df=df_shared, leverage=leverage, mode="train"), mask_fn)
         )
 
+    def mask_fn_eval(env): return env.action_masks()
     eval_env = Monitor(
-        LeverageTradingEnv(df=df_shared, leverage=leverage, mode="eval")
+        ActionMasker(LeverageTradingEnv(df=df_shared, leverage=leverage, mode="eval"), mask_fn_eval)
     )
 
     if load_model_path and os.path.exists(load_model_path):
@@ -403,7 +416,7 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
             f"ent={mutated_ent:.5f}, lr={mutated_lr:.2e}, "
             f"vf={mutated_vf:.3f}, clip={mutated_clip:.3f}"
         )
-        model = PPO.load(
+        model = MaskablePPO.load(
             load_model_path, env=train_env, seed=seed,
             tensorboard_log=log_dir,
             custom_objects={
@@ -424,7 +437,7 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
                     param.add_(noise)
             logger.info(f"    가우시안 노이즈 적용 (σ_rel={noise_std:.4f})")
     else:
-        model = PPO("MlpPolicy", train_env, verbose=0, seed=seed,
+        model = MaskablePPO("MlpPolicy", train_env, verbose=0, seed=seed,
                     tensorboard_log=log_dir, **hp)
 
     eval_cb = CustomEvalCallback(
