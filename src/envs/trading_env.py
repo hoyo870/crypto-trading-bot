@@ -108,8 +108,8 @@ class LeverageTradingEnv(gym.Env):
         else:
             df = df.reset_index(drop=True)
 
-        # mode 기반 데이터 분할 (df 전달 시에만 적용 — data_path 는 전구간 사용)
-        if df is not None and mode in ("train", "eval") and data_path is None:
+        # mode 기반 데이터 분할 (train/eval mode 지정 시 항상 적용)
+        if mode in ("train", "eval"):
             n = len(df)
             if mode == "train":
                 df = df.iloc[:int(n * train_ratio)].reset_index(drop=True)

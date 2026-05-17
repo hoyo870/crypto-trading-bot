@@ -4,6 +4,7 @@ pandas>=1.3.0
 scikit-learn>=1.0.2
 joblib>=1.1.0
 matplotlib>=3.5.0
+tqdm>=4.64.0
 
 # Technical Indicators
 # Windows: use prebuilt wheel package.
@@ -17,8 +18,8 @@ ccxt>=3.0.0
 # Deep Learning (PyTorch)
 torch>=2.5.1,<2.6.0
 
-# Reinforcement Learning (Commander)
+# Reinforcement Learning
 gymnasium>=0.28.1
-stable-baselines3>=2.4.0,<2.5.0
+stable-baselines3>=2.4.0
 sb3-contrib>=2.3.0
 tensorboard>=2.11.0

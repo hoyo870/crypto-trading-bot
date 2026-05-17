@@ -31,7 +31,7 @@ import talib
 
 # ── 경로 설정 ──────────────────────────────────────────────────────────────────
 ROOT_DIR     = Path(__file__).resolve().parents[2]   # crypto_bot/
-SIGNALS_FILE = ROOT_DIR / "data" / "signals" / "base_signals_log.csv"
+SIGNALS_FILE = ROOT_DIR / "data" / "signals" / "BTC_USDT_signals_log.csv"
 RAW_FILE     = ROOT_DIR / "data" / "raw" / "BTC_USDT_5m_raw.csv"
 REPORTS_DIR  = ROOT_DIR / "reports"
 OUTPUT_IMG   = REPORTS_DIR / "base_signal_verification.png"
