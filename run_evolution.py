@@ -196,7 +196,7 @@ def auto_discard_models(reports_dir, model_dir, log_dir, keep_top_k):
     summary_file = os.path.join(reports_dir, "best_by_leverage.csv")
     if not os.path.exists(summary_file):
         logger.warning("⚠️ [경고] 백테스트 요약 파일이 없어 폐기 작업을 건너뜁니다.")
-        return None
+        return None, []
 
     df = pd.read_csv(summary_file)
     df = df.sort_values(by="metric_value", ascending=False).reset_index(drop=True)
@@ -235,7 +235,7 @@ def auto_discard_models(reports_dir, model_dir, log_dir, keep_top_k):
             deleted_count += 1
             
     logger.info(f"✅ 총 {deleted_count}개의 열등한 모델(가중치/차트/로그)이 완벽히 소각되었습니다.\n")
-    return best_model_tag
+    return best_model_tag, survivors
 
 
 # ── 3. 메인 오케스트레이터 루프 ──────────────────────────────────────────────
@@ -328,9 +328,43 @@ def run_evolution_pipeline(args):
             logger.error(f"❌ [{gen_str}] 백테스트 스크립트 실패 (exit {result.returncode}). 진화를 중단합니다.")
             break
         
-        # --- [Phase 3: 자동 폐기 및 다음 세대 부모 선발] ---
-        best_tag = auto_discard_models(gen_reports_dir, gen_model_dir, gen_logs_dir, args.auto_discard_top)
-        
+        # --- [Phase 3: 자동 폐기 및 생존자 선발] ---
+        best_tag, survivors = auto_discard_models(gen_reports_dir, gen_model_dir, gen_logs_dir, args.auto_discard_top)
+
+        # --- [Phase 4: 생존 모델 풀 버전 백테스트 (최종 우승자 결정)] ---
+        if survivors:
+            logger.info("")
+            logger.info(f"🏆 [{gen_str}] 생존 모델 {len(survivors)}개 풀({args.final_eval_env}) 백테스트 시작 — 최종 우승자 결정 중...")
+            full_bt_cmd = [
+                sys.executable, BACKTEST_SCRIPT,
+                "--model-dir",   gen_model_dir,
+                "--reports-dir", gen_reports_dir,
+                "--jobs",        str(args.jobs),
+                "--metric",      args.metric,
+                "--formula",     args.formula,
+                "--tags",        ",".join(survivors),
+                "--env-type",    args.final_eval_env,
+            ]
+            if args.data_path:
+                full_bt_cmd.extend(["--data-path", args.data_path])
+            full_result = subprocess.run(full_bt_cmd, env=env_vars, cwd=ROOT_DIR)
+            if full_result.returncode != 0:
+                logger.warning(f"⚠️ [{gen_str}] 풀 백테스트 실패 — 1차 순위({best_tag})를 그대로 사용합니다.")
+            else:
+                full_csv = os.path.join(gen_reports_dir, "best_by_leverage.csv")
+                try:
+                    df_full = pd.read_csv(full_csv)
+                    df_full = df_full.sort_values("metric_value", ascending=False).reset_index(drop=True)
+                    if not df_full.empty and "tag" in df_full.columns:
+                        new_best = df_full.iloc[0]["tag"]
+                        if new_best != best_tag:
+                            logger.info(f"🔄 [{gen_str}] 풀 백테스트 기준 우승자 변경: {best_tag} → {new_best}")
+                        else:
+                            logger.info(f"✅ [{gen_str}] 풀 백테스트에서도 동일 우승자 유지: {new_best}")
+                        best_tag = new_best
+                except Exception as e:
+                    logger.warning(f"⚠️ [{gen_str}] 풀 백테스트 결과 파싱 실패: {e} — 1차 순위를 그대로 사용합니다.")
+
         if best_tag:
             # 1. 1등 모델의 zip 파일 경로를 정확히 탐색
             winner_source_path = os.path.join(gen_model_dir, f"{best_tag}.zip")
@@ -481,7 +515,12 @@ if __name__ == "__main__":
                         help="부모 대비 최소 점수 향상 폭 (기본: 1.0)")
     parser.add_argument("--parent-max-mdd-delta", type=float, default=2.0,
                         help="부모 대비 허용 가능한 MDD 악화 폭 %%p (기본: 2.0)")
-    
+    parser.add_argument("--final-eval-env",
+                        choices=["baby", "full"], default="full",
+                        help="자동 폐기 후 생존 모델 최종 평가에 사용할 환경\n"
+                             "full: 본절컷·승률보너스 포함 완전체 환경 (기본)\n"
+                             "baby: 초기 배치 평가와 동일한 경량 환경")
+
     args = parser.parse_args()
     
     # 안전장치: 폐기 수를 1 미만으로 적었을 때의 버그 방지
