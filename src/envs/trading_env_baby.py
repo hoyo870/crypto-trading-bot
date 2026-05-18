@@ -250,19 +250,18 @@ class BabyLeverageTradingEnv(gym.Env):
     def action_masks(self) -> np.ndarray:
         """ActionMasker 용: 현재 포지션에 따라 유효한 액션 마스크.
 
-        포지션 없음(0)  → 진입(1~4)만 허용, hold(0)는 항상 유효
-        포지션 보유(±1) → hold(0)는 항상 유효,
-                          청산(5)는 MIN_HOLD_STEPS 이상 보유 시만 허용
-                          (패닉 셀 물리적 차단)
+        포지션 없음(0) -> 진입(1~4)만 허용, hold(0)는 항상 유효
+        포지션 보유(+-1) -> 청산(5)와 hold(0)만 허용
         """
         mask = np.zeros(6, dtype=bool)
         mask[0] = True  # hold 언제나 유효
         if self.position == 0:
             mask[1] = mask[2] = mask[3] = mask[4] = True  # 진입 액션
         else:
+            # ★ 수정: 최소 1시간 (MIN_HOLD_STEPS) 이상 보유 시에만 청산 활성화
             hold_steps = self.current_step - self.entry_step
             if hold_steps >= MIN_HOLD_STEPS:
-                mask[5] = True  # 최소 보유 시간 충족 시만 청산 허용
+                mask[5] = True
         return mask
 
     # ── 스텝 ───────────────────────────────────────────────────────
@@ -302,11 +301,10 @@ class BabyLeverageTradingEnv(gym.Env):
         if self.position != 0 and hold_steps >= self.max_hold_steps:
             action = 5
 
-        # ── 이중 안전장치: 마스킹 돌파 방어 ──────────────────────────
-        # action_masks()가 차단했어도 외부에서 Action 5가 들어올 경우 재차 방어
+        # ★ 수정: 패닉 셀(Panic Sell) 방지를 위한 최소 보유 시간 강제 (이중 안전장치)
         if action == 5 and self.position != 0 and hold_steps < MIN_HOLD_STEPS:
             action = 0
-            reward -= 0.01  # 미세 무효 액션 패널티 (학습 적응 유도)
+            reward -= 0.01  # 미세 무효 액션 패널티
 
         # ── 무효 액션 치환 ────────────────────────────────────────
         is_invalid_action = False

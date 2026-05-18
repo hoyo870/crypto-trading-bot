@@ -17,6 +17,7 @@ LONG_IMBALANCE_THRESHOLD  = 0.55  # 롱 비율 임계치 (초과 시 롱 진입 
 SHORT_IMBALANCE_THRESHOLD = 0.45  # 숏 비율 임계치 (초과 시 숏 진입 패널티)
 IMBALANCE_PENALTY_COEF    = 1.0   # 롱/숏 편향 패널티 계수
 SAFE_LOSS_THRESHOLD    = 0.02  # 손절 안전/지옥 구간 경계 (net_ret 절댓값 기준)
+# ★ 수정: 계좌를 녹이던 본절컷(BREAKEVEN_TRIGGER_PCT) 제거 완료
 
 # ── 포지션 사이징 ─────────────────────────────────────────────────
 # 액션: 0=hold, 1=long_full, 2=long_half, 3=short_full, 4=short_half, 5=close
@@ -94,7 +95,6 @@ class LeverageTradingEnv(gym.Env):
         print(f"[INFO] LeverageTradingEnv v6 lev={int(self.leverage)}x  "
               f"liq_at={1/self.leverage*100:.0f}%raw  "
               f"max_hold={self.max_hold_steps}bars  "
-              f"min_hold={MIN_HOLD_STEPS}bars  "
               f"SafeLoss={SAFE_LOSS_THRESHOLD*100:.0f}%  "
               f"profile={self.tuning_profile}")
 
@@ -238,19 +238,18 @@ class LeverageTradingEnv(gym.Env):
     def action_masks(self) -> np.ndarray:
         """ActionMasker 용: 현재 포지션에 따라 유효한 액션 마스크.
 
-        포지션 없음(0)  → 진입(1~4)만 허용, hold(0)는 항상 유효
-        포지션 보유(±1) → hold(0)는 항상 유효,
-                          청산(5)는 MIN_HOLD_STEPS 이상 보유 시만 허용
-                          (패닉 셀 물리적 차단)
+        포지션 없음(0) → 진입(1~4)만 허용, hold(0)는 항상 유효
+        포지션 보유(±1) → 청산(5)와 hold(0)만 허용
         """
         mask = np.zeros(6, dtype=bool)
         mask[0] = True  # hold 언제나 유효
         if self.position == 0:
             mask[1] = mask[2] = mask[3] = mask[4] = True  # 진입 액션
         else:
+            # ★ 수정: 최소 1시간 (MIN_HOLD_STEPS) 이상 보유 시에만 청산 허용
             hold_steps = self.current_step - self.entry_step
             if hold_steps >= MIN_HOLD_STEPS:
-                mask[5] = True  # 최소 보유 시간 충족 시만 청산 허용
+                mask[5] = True
         return mask
 
     def step(self, action):
@@ -296,8 +295,9 @@ class LeverageTradingEnv(gym.Env):
         if self.position != 0 and hold_steps >= self.max_hold_steps:
             action = 5
 
-        # ── 이중 안전장치: 마스킹 돌파 방어 ──────────────────────────
-        # action_masks()가 차단했어도 외부에서 Action 5가 들어올 경우 재차 방어
+        # ★ 수정: 본절컷(Breakeven Stop) 로직 완전 제거 완료
+
+        # ★ 수정: 최소 보유 전 청산 시도 무효화 (이중 안전장치)
         if action == 5 and self.position != 0 and hold_steps < MIN_HOLD_STEPS:
             action = 0
             reward -= 0.01  # 미세 무효 액션 패널티 (학습 적응 유도)
