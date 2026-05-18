@@ -19,6 +19,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ── 하이퍼파라미터 ───────────────────────────────────────────────
+MIN_HOLD_STEPS      = 12       # 최소 보유: 1시간 (12 × 5분봉) — 패닉 셀 방지
 MAX_HOLD_STEPS_BASE = 288      # 최대 보유: 24시간 고정 (288 × 5분봉)
 MIN_EP_STEPS        = 10_000   # 에피소드 최소 잔여 스텝
 MAX_EP_STEPS        = 20_000   # 에피소드 최대 길이 (~70일)
@@ -249,15 +250,19 @@ class BabyLeverageTradingEnv(gym.Env):
     def action_masks(self) -> np.ndarray:
         """ActionMasker 용: 현재 포지션에 따라 유효한 액션 마스크.
 
-        포지션 없음(0) -> 진입(1~4)만 허용, hold(0)는 항상 유효
-        포지션 보유(+-1) -> 청산(5)와 hold(0)만 허용
+        포지션 없음(0)  → 진입(1~4)만 허용, hold(0)는 항상 유효
+        포지션 보유(±1) → hold(0)는 항상 유효,
+                          청산(5)는 MIN_HOLD_STEPS 이상 보유 시만 허용
+                          (패닉 셀 물리적 차단)
         """
         mask = np.zeros(6, dtype=bool)
         mask[0] = True  # hold 언제나 유효
         if self.position == 0:
             mask[1] = mask[2] = mask[3] = mask[4] = True  # 진입 액션
         else:
-            mask[5] = True  # 청산만
+            hold_steps = self.current_step - self.entry_step
+            if hold_steps >= MIN_HOLD_STEPS:
+                mask[5] = True  # 최소 보유 시간 충족 시만 청산 허용
         return mask
 
     # ── 스텝 ───────────────────────────────────────────────────────
@@ -297,7 +302,11 @@ class BabyLeverageTradingEnv(gym.Env):
         if self.position != 0 and hold_steps >= self.max_hold_steps:
             action = 5
 
-        # ★ Baby: MIN_HOLD_STEPS 조건 완전 삭제 (바로 팔아도 무효 없음)
+        # ── 이중 안전장치: 마스킹 돌파 방어 ──────────────────────────
+        # action_masks()가 차단했어도 외부에서 Action 5가 들어올 경우 재차 방어
+        if action == 5 and self.position != 0 and hold_steps < MIN_HOLD_STEPS:
+            action = 0
+            reward -= 0.01  # 미세 무효 액션 패널티 (학습 적응 유도)
 
         # ── 무효 액션 치환 ────────────────────────────────────────
         is_invalid_action = False
