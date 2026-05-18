@@ -13,8 +13,8 @@ MIN_EP_STEPS        = 10_000   # 에피소드 최소 잔여 스텝
 MAX_EP_STEPS        = 20_000   # 에피소드 최대 길이 (~70일)
 REWARD_CLIP         = 10.0     # per-step 보상 클리핑 범위 (청산 벌점 제외)
 LIQ_PENALTY         = 10000.0  # 강제 청산 기준 벌점 크기(학습 보상에는 클리핑 적용)
-LONG_IMBALANCE_THRESHOLD  = 0.55  # 롱 비율 임계치 (초과 시 롱 진입 패널티)
-SHORT_IMBALANCE_THRESHOLD = 0.45  # 숏 비율 임계치 (초과 시 숏 진입 패널티)
+LONG_IMBALANCE_THRESHOLD  = 0.50  # 롱 비율 임계치 — 데이터 기준 롱 자연치 29%, 50% 초과 시만 패널티
+SHORT_IMBALANCE_THRESHOLD = 0.75  # 숏 비율 임계치 — 데이터 기준 숏 자연치 71%, 75% 초과 시만 패널티
 IMBALANCE_PENALTY_COEF    = 1.0   # 롱/숏 편향 패널티 계수
 SAFE_LOSS_THRESHOLD    = 0.02  # 손절 안전/지옥 구간 경계 (net_ret 절댓값 기준)
 # ★ 수정: 계좌를 녹이던 본절컷(BREAKEVEN_TRIGGER_PCT) 제거 완료
@@ -33,21 +33,21 @@ TUNING_PROFILES = {
     "stable": {
         "hold_profit_peak_bonus": 0.0000,
         "hold_loss_base_penalty": -0.00025,
-        "loss_time_exp_rate": 2.0,
+        "loss_time_exp_rate": 1.0,   # Fix3: 2.0→1.0 (24h weight: 7.4×→2.7×)
         "drawdown_threshold": 0.04,
         "drawdown_penalty_coef": 0.12,
     },
     "balanced": {
         "hold_profit_peak_bonus": 0.0002,
         "hold_loss_base_penalty": -0.00030,
-        "loss_time_exp_rate": 2.8,
+        "loss_time_exp_rate": 1.4,   # Fix3: 2.8→1.4 (24h weight: 16.4×→4.1×)
         "drawdown_threshold": 0.05,
         "drawdown_penalty_coef": 0.10,
     },
     "aggressive": {
         "hold_profit_peak_bonus": 0.0005,
         "hold_loss_base_penalty": -0.00035,
-        "loss_time_exp_rate": 3.4,
+        "loss_time_exp_rate": 1.8,   # Fix3: 3.4→1.8 (24h weight: 30×→6.0×)
         "drawdown_threshold": 0.07,
         "drawdown_penalty_coef": 0.08,
     },
@@ -119,9 +119,16 @@ class LeverageTradingEnv(gym.Env):
         self.max_steps = len(df) - 1
 
         self.closes = df['close'].values.astype(np.float32)
-        self.long_scores = df['long_score'].values.astype(np.float32)
-        self.short_scores = df['short_score'].values.astype(np.float32)
-        self.context_scores = df['context_score'].values.astype(np.float32)
+        # Fix1: z-정규화 — raw score 범위(~0.025)를 관측 공간 [-1,1]에 고르게 분포
+        # long/short: z-score /3 → [-1,1] 내 수렴 (3σ 기준)
+        # context: min-max → [-1,1]
+        _l_mean = float(df['long_score'].mean());  _l_std = float(df['long_score'].std()) + 1e-8
+        _s_mean = float(df['short_score'].mean()); _s_std = float(df['short_score'].std()) + 1e-8
+        _c_min  = float(df['context_score'].min())
+        _c_rng  = float(df['context_score'].max()) - _c_min + 1e-8
+        self.long_scores    = np.clip((df['long_score'].values  - _l_mean) / _l_std / 3.0, -1.0, 1.0).astype(np.float32)
+        self.short_scores   = np.clip((df['short_score'].values - _s_mean) / _s_std / 3.0, -1.0, 1.0).astype(np.float32)
+        self.context_scores = np.clip((df['context_score'].values - _c_min) / _c_rng * 2.0 - 1.0, -1.0, 1.0).astype(np.float32)
 
         dt = pd.to_datetime(df['datetime'])
         hours = dt.dt.hour.values
@@ -379,7 +386,8 @@ class LeverageTradingEnv(gym.Env):
                     if raw_ret >= self.peak_unrealized_profit:
                         reward += self.hold_profit_peak_bonus
                     else:
-                        reward += -(self.peak_unrealized_profit - raw_ret) * 100.0 * 0.1
+                        # Fix4: 0.1→0.03 — MIN_HOLD로 물리적 차단 완료, 트레일링 패널티 경감
+                        reward += -(self.peak_unrealized_profit - raw_ret) * 100.0 * 0.03
                 else:
                     # 튜닝 프로파일 기반: 시간 가중치 + 손실 깊이 반영
                     time_weight = math.exp(self.loss_time_exp_rate * (hold_steps / 288.0))

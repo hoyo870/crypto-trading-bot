@@ -130,9 +130,16 @@ class BabyLeverageTradingEnv(gym.Env):
             self._step_hi = n
 
         self.closes         = df['close'].values.astype(np.float32)
-        self.long_scores    = df['long_score'].values.astype(np.float32)
-        self.short_scores   = df['short_score'].values.astype(np.float32)
-        self.context_scores = df['context_score'].values.astype(np.float32)
+        # Fix1: z-정규화 — raw score 범위(~0.025)를 관측 공간 [-1,1]에 고르게 분포
+        # long/short: z-score /3 → [-1,1] 내 수렴 (3σ 기준)
+        # context: min-max → [-1,1]
+        _l_mean = float(df['long_score'].mean());  _l_std = float(df['long_score'].std()) + 1e-8
+        _s_mean = float(df['short_score'].mean()); _s_std = float(df['short_score'].std()) + 1e-8
+        _c_min  = float(df['context_score'].min())
+        _c_rng  = float(df['context_score'].max()) - _c_min + 1e-8
+        self.long_scores    = np.clip((df['long_score'].values  - _l_mean) / _l_std / 3.0, -1.0, 1.0).astype(np.float32)
+        self.short_scores   = np.clip((df['short_score'].values - _s_mean) / _s_std / 3.0, -1.0, 1.0).astype(np.float32)
+        self.context_scores = np.clip((df['context_score'].values - _c_min) / _c_rng * 2.0 - 1.0, -1.0, 1.0).astype(np.float32)
 
         dt = pd.to_datetime(df['datetime'])
         hours = dt.dt.hour.values
