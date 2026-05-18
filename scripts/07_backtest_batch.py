@@ -75,7 +75,8 @@ def _resolve_model_path(tag: str, model_dir: str):
 
 # ── 단일 백테스트 subprocess 실행 ─────────────────────────────────────────
 def _run_one(tag: str, model_dir: str, data_path: str,
-             reports_dir: str, tuning_profile: str) -> tuple:
+             reports_dir: str, tuning_profile: str,
+             env_type: str = "baby") -> tuple:
     model_path = _resolve_model_path(tag, model_dir)
     if not model_path:
         return tag, False, f"모델 파일 없음: {tag}"
@@ -87,6 +88,7 @@ def _run_one(tag: str, model_dir: str, data_path: str,
         "--data-path",      data_path,
         "--reports-dir",    reports_dir,
         "--tuning-profile", tuning_profile,
+        "--env-type",       env_type,
     ]
     try:
         env = os.environ.copy()
@@ -132,7 +134,8 @@ def _load_tags(tags_arg, model_dir: str) -> list:
 # ── 배치 실행 ──────────────────────────────────────────────────────────────
 def run_backtest_batch(tags: list, model_dir: str, data_path: str,
                        reports_dir: str, tuning_profile: str,
-                       metric: str, formula: str = "balanced", jobs: int = 5):
+                       metric: str, formula: str = "balanced",
+                       jobs: int = 5, env_type: str = "baby"):
     total = len(tags)
     logger.info("")
     logger.info("=" * 70)
@@ -148,7 +151,7 @@ def run_backtest_batch(tags: list, model_dir: str, data_path: str,
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {
             executor.submit(
-                _run_one, tag, model_dir, data_path, reports_dir, tuning_profile
+                _run_one, tag, model_dir, data_path, reports_dir, tuning_profile, env_type
             ): tag
             for tag in tags
         }
@@ -199,6 +202,10 @@ if __name__ == "__main__":
     parser.add_argument("--reports-dir",  type=str, default=default_reports_dir)
     parser.add_argument("--tuning-profile",
                         choices=["stable", "balanced", "aggressive"], default="balanced")
+    parser.add_argument("--env-type",
+                        choices=["baby", "full"], default="baby",
+                        help="백테스트 환경 (기본: baby). "
+                             "finetune 모델 배치시 full 지정 필요.")
     parser.add_argument("--metric",
                         choices=["score", "total_return_pct", "sharpe_ratio", "mdd_pct"],
                         default="score")
@@ -230,4 +237,5 @@ if __name__ == "__main__":
         metric=args.metric,
         formula=args.formula,
         jobs=args.jobs,
+        env_type=args.env_type,
     )

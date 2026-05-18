@@ -38,7 +38,7 @@ ROOT_DIR   = os.path.dirname(SCRIPT_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from src.envs.trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
+# ── 환경 임포트는 run_backtest() 내부에서 env_type 에 따라 동적으로 수행 ──
 
 # ── 로깅 ───────────────────────────────────────────────────────────────────
 os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
@@ -114,16 +114,29 @@ def _resolve_model_path(tag: str, model_dir: str):
 # ── 핵심 백테스트 함수 ─────────────────────────────────────────────────────
 def run_backtest(model_paths: list, tag: str, leverage: int,
                  data_path: str, reports_dir: str,
-                 tuning_profile: str = "balanced") -> dict:
+                 tuning_profile: str = "balanced",
+                 env_type: str = "baby") -> dict:
     """
     모델 1개(또는 앙상블)를 환경 전체 구간으로 백테스트합니다.
 
+    Args:
+        env_type: "baby" → BabyLeverageTradingEnv,
+                  "full" → LeverageTradingEnv (본절컷·승률보너스 포함)
     Returns:
         summary dict (JSON + 차트 저장 후 반환)
     """
+    # 환경 클래스 동적 선택
+    if env_type == "full":
+        from src.envs.trading_env import LeverageTradingEnv
+        # mode 미지정 → 70/30 분할 없이 전체 구간 백테스트
+        env = LeverageTradingEnv(data_path=data_path, leverage=leverage,
+                                 tuning_profile=tuning_profile)
+    else:
+        from src.envs.trading_env_baby import BabyLeverageTradingEnv as LeverageTradingEnv
+        env = LeverageTradingEnv(data_path=data_path, leverage=leverage,
+                                 tuning_profile=tuning_profile)
+
     dt_index = _load_datetimes(data_path)
-    env = LeverageTradingEnv(data_path=data_path, leverage=leverage,
-                             tuning_profile=tuning_profile)
 
     models = [MaskablePPO.load(p) for p in model_paths]
     obs, _ = env.reset(options={"start_step": 0, "max_ep_steps": None})
@@ -213,6 +226,10 @@ if __name__ == "__main__":
                         default=os.path.join(ROOT_DIR, "reports"))
     parser.add_argument("--tuning-profile",
                         choices=["stable", "balanced", "aggressive"], default="balanced")
+    parser.add_argument("--env-type",
+                        choices=["baby", "full"], default=None,
+                        help="백테스트 환경 선택 (기본: baby). "
+                             "모델 태그에 'finetune'이 포함되면 자동으로 full 로 전환.")
 
     args = parser.parse_args()
 
@@ -220,9 +237,16 @@ if __name__ == "__main__":
     tag      = args.tag or os.path.splitext(os.path.basename(model_paths[0]))[0]
     leverage = args.leverage or _infer_leverage_from_tag(tag) or 2
 
-    logger.info(f"백테스트 시작: {tag} (lev={leverage}x)")
+    # 자동 감지: 태그에 'finetune' 포함 시 full 환경으로 오버라이드
+    env_type = args.env_type or "baby"
+    if "finetune" in tag.lower() and args.env_type is None:
+        env_type = "full"
+        logger.info(f"태그에 'finetune' 감지 → env-type 자동 전환: full")
+
+    logger.info(f"백테스트 시작: {tag} (lev={leverage}x, env={env_type})")
     result = run_backtest(model_paths, tag, leverage,
-                          args.data_path, args.reports_dir, args.tuning_profile)
+                          args.data_path, args.reports_dir,
+                          args.tuning_profile, env_type)
     logger.info(
         f"완료: 수익률={result['total_return_pct']:+.2f}% | "
         f"MDD={result['mdd_pct']:.2f}% | Sharpe={result['sharpe_ratio']:.3f}"
