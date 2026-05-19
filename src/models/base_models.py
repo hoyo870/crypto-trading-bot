@@ -53,14 +53,14 @@ class CryptoExpertDataset(Dataset):
 # ─────────────────────────────────────────────────────────────
 class PriceActionExpert(nn.Module):
     """
-    가격/거래량(OHLCV) 전용 전문가.
-    입력 피처 수: 5개 (Open, High, Low, Close, Volume)
-    출력: 0~1 확률값 (Sigmoid)
+    가격/거래량(OHLCV) + 기술적 지표 통합 전문가.
+    입력 피처 수: price_vol(5) + context(18) = 23개 (input_dim으로 동적 결정)
+    출력: logit (BCEWithLogitsLoss 와 함께 사용)
     """
-    def __init__(self, hidden_dim=64, dropout=0.3):
+    def __init__(self, input_dim=5, hidden_dim=64, dropout=0.3):
         super(PriceActionExpert, self).__init__()
-        # 입력 차원: 5 (Open, High, Low, Close, Volume)
-        self.lstm = nn.LSTM(5, hidden_dim, num_layers=2, batch_first=True, dropout=dropout)
+        # [Fix 9] input_dim 동적 파라미터화 (OHLCV 5 → OHLCV+context 23)
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers=2, batch_first=True, dropout=dropout)
         # [Fix 5] 시계열에 적합한 LayerNorm으로 교체 (BatchNorm1d 제거)
         self.ln = nn.LayerNorm(hidden_dim)
         # [Fix 7] Sigmoid 제거 → BCEWithLogitsLoss 와 함께 사용 (ContextExpert 와 통일)
@@ -254,7 +254,9 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     context_cols = [c for c in df.columns if c not in price_vol_cols + exclude_cols]
 
     if expert_type in ['long', 'short']:
-        features = df[price_vol_cols].values.astype(np.float32)
+        # [Fix 9] OHLCV(5) + 기술적 지표(18) 통합 피처: 방향성 예측에 필요한 컨텍스트 추가
+        # context_cols: rsi, bb_width/pct, stoch_k/d, td_setup, ema_*_r, macd_*_r, pat_*
+        features = df[price_vol_cols + context_cols].values.astype(np.float32)
     else:
         features = df[context_cols].values.astype(np.float32)
         

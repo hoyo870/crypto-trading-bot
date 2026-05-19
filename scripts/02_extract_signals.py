@@ -276,7 +276,8 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     _train_end_row = int((_dt_split <= _PHASE_BULL_END).sum())
     _val_end_row   = int((_dt_split <= _PHASE_VAL_END).sum())
 
-    test_pv_features = df[price_vol_cols].values.astype(np.float32)[val_end:]
+    # [Sync Fix 9] long/short 추론 피처 = OHLCV(5) + context(18) = 23 (훈련과 동일)
+    test_pv_features  = df[price_vol_cols + context_cols].values.astype(np.float32)[val_end:]
     test_ctx_features = df[context_cols].values.astype(np.float32)[val_end:]
     test_close = raw_close[val_end:]
     test_dates = raw_dates[val_end:]
@@ -284,11 +285,13 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     logger.info(f"[INFO] 3개의 전문가 모델 로딩 중...")
     model_dir = os.path.join(ROOT_DIR, "checkpoints", "base_experts")
 
-    long_model = PriceActionExpert().to(device)
+    # [Sync Fix 9] PriceActionExpert input_dim = price_vol(5) + context(18) = 23
+    _pa_input_dim = len(price_vol_cols) + len(context_cols)
+    long_model = PriceActionExpert(input_dim=_pa_input_dim).to(device)
     long_model.load_state_dict(torch.load(os.path.join(model_dir, "long_expert.pth"), map_location=device, weights_only=True))
     long_model.eval()
 
-    short_model = PriceActionExpert().to(device)
+    short_model = PriceActionExpert(input_dim=_pa_input_dim).to(device)
     short_model.load_state_dict(torch.load(os.path.join(model_dir, "short_expert.pth"), map_location=device, weights_only=True))
     short_model.eval()
 

@@ -70,8 +70,9 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     train_loader, val_loader, test_loader, input_dim, pos_weight = prepare_expert_data(data_path, expert_type, seq_length)
 
     # 모델 선택
+    # [Fix 9] PriceActionExpert도 input_dim 동적 전달 (OHLCV 5 → OHLCV+context 23)
     if expert_type in ['long', 'short']:
-        model = PriceActionExpert(hidden_dim=64, dropout=0.3).to(device)
+        model = PriceActionExpert(input_dim=input_dim, hidden_dim=64, dropout=0.3).to(device)
     else:
         model = ContextExpert(input_dim=input_dim, hidden_dim=64, dropout=0.3).to(device)
 
