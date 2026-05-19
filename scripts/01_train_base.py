@@ -75,19 +75,19 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     else:
         model = ContextExpert(input_dim=input_dim, hidden_dim=64, dropout=0.3).to(device)
 
-    # 손실 함수: long/short는 FocalLoss(alpha=pos_weight, gamma=2.0), context는 BCELoss
+    # 손실 함수: long/short는 FocalLoss(alpha=0.75, gamma=2.0), context는 BCEWithLogitsLoss
     # Focal Loss는 희소한 양성 클래스(long 신호 등)를 더 강하게 학습해 출력 범위를 확장합니다.
     if expert_type in ['long', 'short']:
-        # 1:3 capped 후에도 자연 neg:pos 비율(≈2:1)이 그대로 남아 alpha=1.0이면
-        # 모델이 항상 "신호 없음"만 예측하는 all-zero collapse에 빠짐.
-        # → alpha = pos_weight(neg/pos 비율)로 양성 클래스에 가중치 부여.
-        # clamp 4.0: 극단적 alpha는 all-ones 수렴 위험이 있으므로 상한 고정.
-        focal_alpha = min(float(pos_weight), 4.0)
+        # [Fix 6] 데이터가 이미 1:3으로 캡핑되었으므로 pos_weight_raw(원본 비율)를 alpha에
+        # 그대로 쓰면 가중치 충돌로 all-ones 수렴이 발생. alpha=0.75로 고정해 안정화.
+        focal_alpha = 0.75
         criterion = FocalLoss(alpha=focal_alpha, gamma=2.0)
-        logger.info(f"  손실함수: FocalLoss(alpha={focal_alpha:.2f}, gamma=2.0) | raw pos_weight={pos_weight:.2f} (1:3 capped, alpha=pos_weight)")
+        logger.info(f"  손실함수: FocalLoss(alpha={focal_alpha:.2f}, gamma=2.0) | raw pos_weight={pos_weight:.2f}")
     else:
-        criterion = nn.BCELoss()
-        logger.info(f"  손실함수: BCELoss | raw pos_weight={pos_weight:.2f}")
+        # [Fix 6] ContextExpert는 Sigmoid 제거 → BCEWithLogitsLoss(pos_weight) 사용
+        pos_w = torch.tensor([min(float(pos_weight), 4.0)], device=device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
+        logger.info(f"  손실함수: BCEWithLogitsLoss(pos_weight={pos_w.item():.2f}) | raw pos_weight={pos_weight:.2f}")
     optimizer = Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
@@ -123,10 +123,12 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
                     loss = criterion(predictions, y_batch)
                     val_loss += loss.item()
                     
-                    binary_preds = (predictions >= 0.5).float()
+                    # [Fix 6] ContextExpert는 logit 출력 → sigmoid로 확률 변환 후 평가
+                    probs = torch.sigmoid(predictions) if expert_type == 'context' else predictions
+                    binary_preds = (probs >= 0.5).float()
                     val_preds.extend(binary_preds.cpu().numpy())
                     val_trues.extend(y_batch.cpu().numpy())
-                    val_probs.extend(predictions.cpu().numpy())
+                    val_probs.extend(probs.cpu().numpy())
 
             val_f1  = f1_score(val_trues, val_preds, zero_division=0)
             val_acc = accuracy_score(val_trues, val_preds)

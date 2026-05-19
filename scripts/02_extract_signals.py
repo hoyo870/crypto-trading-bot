@@ -200,9 +200,10 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     _q_cutoff = int((_dt_q <= _PHASE_BULL_END).sum())
     if _q_cutoff == 0:
         _q_cutoff = int(len(df) * 0.70)
+    # [Sync Fix 2] base_models.py와 동일: prev_close 기준 Log Return (캔들 형태 보존)
+    prev_close = df['close_raw'].shift(1)
     for col in price_cols:
-        # base_models.py와 동일한 변환: log return (train-inference 일관성)
-        df[col] = np.log(df[f'{col}_raw'] / df[f'{col}_raw'].shift(1)).fillna(0)
+        df[col] = np.log(df[f'{col}_raw'] / prev_close).fillna(0)
         q_lo = df[col].iloc[:_q_cutoff].quantile(0.001)
         q_hi = df[col].iloc[:_q_cutoff].quantile(0.999)
         df[col] = df[col].clip(q_lo, q_hi)
@@ -293,15 +294,18 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
             
             long_scores.extend(long_model(pv_batch).cpu().numpy())
             short_scores.extend(short_model(pv_batch).cpu().numpy())
-            context_scores.extend(context_model(ctx_batch).cpu().numpy())
+            # [Sync Fix 6] ContextExpert는 logit 출력 → sigmoid로 확률 변환 후 저장
+            context_scores.extend(torch.sigmoid(context_model(ctx_batch)).cpu().numpy())
 
     logger.info(f"[INFO] 추론 완료 ({time.time() - t0:.1f}초)")
 
-    # 결과 저장
-    out_dates = test_dates[seq_length:seq_length+len(long_scores)]
+    # [Sync Fix 1] 학습 시 end_idx가 seq_length-1부터 시작하므로
+    # 추론 윈도우 idx=0의 마지막 캔들 = seq_length-1. 타임스탬프 오프셋 1 조정.
+    out_start = seq_length - 1
+    out_dates = test_dates[out_start : out_start + len(long_scores)]
     results_df = pd.DataFrame({
         'datetime': out_dates,
-        'close': test_close[seq_length:seq_length+len(long_scores)],
+        'close': test_close[out_start : out_start + len(long_scores)],
         'long_score': np.round(long_scores, 4),
         'short_score': np.round(short_scores, 4),
         'context_score': np.round(context_scores, 4)

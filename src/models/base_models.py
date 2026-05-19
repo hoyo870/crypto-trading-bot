@@ -37,9 +37,10 @@ class CryptoExpertDataset(Dataset):
     def __getitem__(self, idx):
         # valid_indices에서 실제 데이터의 끝점(target 시점)을 가져옴
         end_idx = self.valid_indices[idx]
-        start_idx = end_idx - self.seq_length
+        # [Fix 1] end_idx 캔들 자체를 피처에 포함 (off-by-one 수정)
+        start_idx = end_idx - self.seq_length + 1
         
-        x = self.features[start_idx : end_idx]
+        x = self.features[start_idx : end_idx + 1]
         y = self.targets[end_idx]
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
@@ -56,7 +57,8 @@ class PriceActionExpert(nn.Module):
         super(PriceActionExpert, self).__init__()
         # 입력 차원: 5 (Open, High, Low, Close, Volume)
         self.lstm = nn.LSTM(5, hidden_dim, num_layers=2, batch_first=True, dropout=dropout)
-        self.bn = nn.BatchNorm1d(hidden_dim)
+        # [Fix 5] 시계열에 적합한 LayerNorm으로 교체 (BatchNorm1d 제거)
+        self.ln = nn.LayerNorm(hidden_dim)
         self.fc = nn.Sequential(
             nn.Linear(hidden_dim, 32),
             nn.ReLU(),
@@ -67,7 +69,7 @@ class PriceActionExpert(nn.Module):
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        feat = self.bn(out[:, -1, :])
+        feat = self.ln(out[:, -1, :])
         return self.fc(feat).squeeze(1)
 
 class ContextExpert(nn.Module):
@@ -79,18 +81,19 @@ class ContextExpert(nn.Module):
     def __init__(self, input_dim, hidden_dim=64, dropout=0.3):
         super(ContextExpert, self).__init__()
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers=2, batch_first=True, dropout=dropout)
-        self.bn = nn.BatchNorm1d(hidden_dim)
+        # [Fix 5] 시계열에 적합한 LayerNorm으로 교체 (BatchNorm1d 제거)
+        self.ln = nn.LayerNorm(hidden_dim)
+        # [Fix 6] Sigmoid 제거 → BCEWithLogitsLoss 와 함께 사용 (수치 안정성 향상)
         self.fc = nn.Sequential(
             nn.Linear(hidden_dim, 32),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(32, 1),
-            nn.Sigmoid()
         )
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        feat = self.bn(out[:, -1, :])
+        feat = self.ln(out[:, -1, :])
         return self.fc(feat).squeeze(1)
 
 
@@ -127,9 +130,11 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     train_cutoff = int((_dt_for_cutoff <= _PHASE_BULL_END).sum())
     if train_cutoff == 0:  # fallback: 전체 raw 데이터가 bear 기간만 있는 경우
         train_cutoff = int(len(df) * 0.70)
+    # [Fix 2] 모든 OHLC를 직전 캔들의 종가(prev_close) 기준 Log Return으로 통일
+    # → 캔들 내부 구조(O/H/L/C 상대 위치)가 보존되어 캔들 형태가 유지됨
+    prev_close = df['close_raw'].shift(1)
     for col in price_cols:
-        # Log Return: 신경망에 더 적합한 대칭 분포, pct_change 대비 극값 압축 효과
-        df[col] = np.log(df[f'{col}_raw'] / df[f'{col}_raw'].shift(1)).fillna(0)
+        df[col] = np.log(df[f'{col}_raw'] / prev_close).fillna(0)
         q_lo = df[col].iloc[:train_cutoff].quantile(0.001)
         q_hi = df[col].iloc[:train_cutoff].quantile(0.999)
         df[col] = df[col].clip(q_lo, q_hi)
@@ -156,6 +161,8 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     # 14주기 ATR 계산 및 가격 대비 비율(%)로 변환
     # h, l, c 는 위 캔들 패턴 블록에서 이미 df['*_raw'].values 로 정의됨
     close_prices = df['close_raw'].values
+    high_prices  = df['high_raw'].values   # [Fix 3] 꼬리 기반 라벨링용
+    low_prices   = df['low_raw'].values    # [Fix 3] 꼬리 기반 라벨링용
     n = len(close_prices)
     _atr_abs = talib.ATR(h, l, close_prices, timeperiod=14)
     _atr_pct  = np.where(close_prices > 0,
@@ -173,17 +180,22 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
         sl_thresh = max(MIN_SL, SL_MULT * _atr_pct[i])
 
         curr_p = close_prices[i]
-        future_window = close_prices[i+1: i+1+horizon]
-        ret = (future_window - curr_p) / curr_p * 100
+        # [Fix 3] 미래 윈도우의 고가·저가로 TP/SL 판별 (꼬리 노이즈 반영)
+        future_high = high_prices[i+1: i+1+horizon]
+        future_low  = low_prices[i+1:  i+1+horizon]
+        ret_high = (future_high - curr_p) / curr_p * 100
+        ret_low  = (future_low  - curr_p) / curr_p * 100
 
-        hit_tp_long = np.where(ret >= tp_thresh)[0]
-        hit_sl_long = np.where(ret <= -sl_thresh)[0]
+        # Long: 고가로 익절 / 저가로 손절
+        hit_tp_long = np.where(ret_high >= tp_thresh)[0]
+        hit_sl_long = np.where(ret_low  <= -sl_thresh)[0]
         idx_tp_long = hit_tp_long[0] if len(hit_tp_long) > 0 else horizon + 1
         idx_sl_long = hit_sl_long[0] if len(hit_sl_long) > 0 else horizon + 1
         is_long = (idx_tp_long < idx_sl_long) and (idx_tp_long <= horizon)
 
-        hit_tp_short = np.where(ret <= -tp_thresh)[0]
-        hit_sl_short = np.where(ret >= sl_thresh)[0]
+        # Short: 저가로 익절 / 고가로 손절
+        hit_tp_short = np.where(ret_low  <= -tp_thresh)[0]
+        hit_sl_short = np.where(ret_high >= sl_thresh)[0]
         idx_tp_short = hit_tp_short[0] if len(hit_tp_short) > 0 else horizon + 1
         idx_sl_short = hit_sl_short[0] if len(hit_sl_short) > 0 else horizon + 1
         is_short = (idx_tp_short < idx_sl_short) and (idx_tp_short <= horizon)
@@ -225,7 +237,8 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     _bull_end_pos = int((_dt <= _PHASE_BULL_END).sum())
     _val_end_pos  = int((_dt <= _PHASE_VAL_END).sum())
 
-    total_valid_indices = np.arange(seq_length, len(features))
+    # [Fix 1] off-by-one 수정: end_idx = seq_length - 1 일 때 start_idx = 0
+    total_valid_indices = np.arange(seq_length - 1, len(features))
 
     # horizon 여백 추가: 경계 근처 타겟이 반대편 구간 가격을 참조하는 것을 완전 차단
     raw_train_indices = total_valid_indices[
@@ -259,8 +272,9 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
         return np.sort(np.concatenate([pos_idx, neg_idx]))
 
     train_indices = get_capped_indices(raw_train_indices, targets)
-    val_indices   = get_capped_indices(raw_val_indices,   targets)
-    test_indices  = get_capped_indices(raw_test_indices,  targets)
+    # [Fix 4] Val/Test는 평가 무결성을 위해 언더샘플링 없이 원본 인덱스 그대로 사용
+    val_indices   = raw_val_indices
+    test_indices  = raw_test_indices
 
     # 전체 배열(features, targets)은 자르지 않고 그대로 Dataset에 넘김 (인덱스만 전달)
     train_dataset = CryptoExpertDataset(features, targets, seq_length, train_indices)

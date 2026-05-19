@@ -8,15 +8,20 @@ tqdm>=4.64.0
 setuptools<81  # pkg_resources 포함 버전 (tensorboard 호환)
 
 # Technical Indicators
-# Windows: use prebuilt wheel package.
+# [Windows]  사전 빌드 바이너리 사용 — C 라이브러리 별도 설치 불필요
 TA-Lib-binary>=0.4.24; platform_system == "Windows"
-# macOS/Linux: use official package (may require system TA-Lib C library).
+# [macOS]    brew install ta-lib 선행 필요 (README Setup 참고)
+# [Linux]    apt install libta-lib-dev 선행 필요
 TA-Lib>=0.4.24; platform_system != "Windows"
 
 # Cryptocurrency Exchange API
 ccxt>=3.0.0
 
 # Deep Learning (PyTorch)
+# [Windows + CUDA GPU]   pytorch.org 에서 CUDA 버전에 맞는 명령으로 별도 설치 권장
+#   예) pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+# [macOS Apple Silicon]  MPS 백엔드 자동 활성화 (torch 2.x)
+# [CPU / 공통 fallback]  아래 패키지로 설치
 torch>=2.5.1,<2.6.0
 
 # Reinforcement Learning
