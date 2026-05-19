@@ -17,7 +17,7 @@ ROOT_DIR = os.path.dirname(BASE_DIR)
 if ROOT_DIR not in os.sys.path:
     os.sys.path.insert(0, ROOT_DIR)
 
-from src.models.base_models import PriceActionExpert, ContextExpert, prepare_expert_data
+from src.models.base_models import PriceActionExpert, ContextExpert, prepare_expert_data, _MAX_NEG_RATIO
 from src.utils.platform_utils import get_device, configure_torch, log_platform_info
 
 
@@ -77,17 +77,12 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
 
     # 손실 함수: long/short는 FocalLoss(alpha=0.75, gamma=2.0), context는 BCEWithLogitsLoss
     # Focal Loss는 희소한 양성 클래스(long 신호 등)를 더 강하게 학습해 출력 범위를 확장합니다.
-    if expert_type in ['long', 'short']:
-        # [Fix 6] 데이터가 이미 1:3으로 캡핑되었으므로 pos_weight_raw(원본 비율)를 alpha에
-        # 그대로 쓰면 가중치 충돌로 all-ones 수렴이 발생. alpha=0.75로 고정해 안정화.
-        focal_alpha = 0.75
-        criterion = FocalLoss(alpha=focal_alpha, gamma=2.0)
-        logger.info(f"  손실함수: FocalLoss(alpha={focal_alpha:.2f}, gamma=2.0) | raw pos_weight={pos_weight:.2f}")
-    else:
-        # [Fix 6] ContextExpert는 Sigmoid 제거 → BCEWithLogitsLoss(pos_weight) 사용
-        pos_w = torch.tensor([min(float(pos_weight), 4.0)], device=device)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
-        logger.info(f"  손실함수: BCEWithLogitsLoss(pos_weight={pos_w.item():.2f}) | raw pos_weight={pos_weight:.2f}")
+    # [Fix 7] long/short/context 모두 BCEWithLogitsLoss 으로 통일
+    # pos_weight = min(raw_ratio, _MAX_NEG_RATIO) → 데이터 캐핑 1:_MAX_NEG_RATIO 와 일치시켜 이중 보정 방지
+    pos_w_val = min(float(pos_weight), float(_MAX_NEG_RATIO))
+    pos_w = torch.tensor([pos_w_val], device=device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
+    logger.info(f"  손실함수: BCEWithLogitsLoss(pos_weight={pos_w.item():.2f}) | raw pos_weight={pos_weight:.2f}")
     optimizer = Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
@@ -123,8 +118,8 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
                     loss = criterion(predictions, y_batch)
                     val_loss += loss.item()
                     
-                    # [Fix 6] ContextExpert는 logit 출력 → sigmoid로 확률 변환 후 평가
-                    probs = torch.sigmoid(predictions) if expert_type == 'context' else predictions
+                    # [Fix 7] 모든 expert가 logit 출력 → sigmoid로 확률 변환 후 평가
+                    probs = torch.sigmoid(predictions)
                     binary_preds = (probs >= 0.5).float()
                     val_preds.extend(binary_preds.cpu().numpy())
                     val_trues.extend(y_batch.cpu().numpy())
@@ -138,9 +133,15 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
             except ValueError:
                 val_auc = 0.0
 
-            # all-ones/all-zeros 퇴화 솔루션 감지 (val Acc≈0.5 & F1≈0.667 패턴)
-            is_trivial = (val_acc < 0.515) and (val_f1 > 0.63)
-            trivial_flag = " [⚠️ trivial: all-1 예측]" if is_trivial else ""
+            # 퇴화 솔루션 감지: all-ones (val_acc≈0.5, F1>0.63) OR all-zeros (F1≈0, acc 높음)
+            is_trivial_ones  = (val_acc < 0.515) and (val_f1 > 0.63)
+            is_trivial_zeros = (val_f1 < 0.01)  and (val_acc > 0.55)
+            if is_trivial_ones:
+                trivial_flag = " [⚠️ trivial: all-1 예측]"
+            elif is_trivial_zeros:
+                trivial_flag = " [⚠️ trivial: all-0 예측]"
+            else:
+                trivial_flag = ""
 
             logger.info(
                 f"Epoch [{epoch+1:03d}/{epochs}] | Loss: {train_loss/len(train_loader):.4f} "

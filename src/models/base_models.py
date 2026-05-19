@@ -17,6 +17,10 @@ from src.utils.platform_utils import get_optimal_workers, get_pin_memory
 _PHASE_BULL_END = pd.Timestamp('2025-06-30 23:59:00')
 _PHASE_VAL_END  = pd.Timestamp('2025-10-31 23:59:00')
 
+# ── 훈련 데이터 언더샘플링 상한 (Pos 1 : Neg 최대 N) ─────────────────────────
+# BCEWithLogitsLoss pos_weight 계산과 일치시켜 이중 보정을 방지합니다.
+_MAX_NEG_RATIO = 3
+
 # ─────────────────────────────────────────────────────────────
 # 1. 시계열 커스텀 데이터셋 (연속성 보장 구조로 개선)
 # ─────────────────────────────────────────────────────────────
@@ -59,12 +63,12 @@ class PriceActionExpert(nn.Module):
         self.lstm = nn.LSTM(5, hidden_dim, num_layers=2, batch_first=True, dropout=dropout)
         # [Fix 5] 시계열에 적합한 LayerNorm으로 교체 (BatchNorm1d 제거)
         self.ln = nn.LayerNorm(hidden_dim)
+        # [Fix 7] Sigmoid 제거 → BCEWithLogitsLoss 와 함께 사용 (ContextExpert 와 통일)
         self.fc = nn.Sequential(
             nn.Linear(hidden_dim, 32),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(32, 1),
-            nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -209,6 +213,25 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
 
     df['Target'] = targets
 
+    # ── 상대적/가격정규화 지표 피처 생성 (raw 컬럼 제거 전) ────────────────────
+    # 절대 가격 수준 종속성을 제거해 Bear/Bull 기간 모두 일관된 값 범위를 보장합니다.
+    _cr      = df['close_raw'].values.astype(np.float64)
+    _safe_cr = np.where(_cr > 0, _cr, 1.0)  # 0-division 방지
+
+    # EMA 거리 비율: (ema / close - 1)  → 양수=가격이 EMA 위, 음수=아래
+    _ema20_v  = talib.EMA(_cr, timeperiod=20)
+    _ema50_v  = talib.EMA(_cr, timeperiod=50)
+    _ema200_v = talib.EMA(_cr, timeperiod=200)
+    df['ema_20_r']  = np.clip(np.where(np.isnan(_ema20_v),  0.0, _ema20_v  / _safe_cr - 1.0), -0.30, 0.30)
+    df['ema_50_r']  = np.clip(np.where(np.isnan(_ema50_v),  0.0, _ema50_v  / _safe_cr - 1.0), -0.50, 0.50)
+    df['ema_200_r'] = np.clip(np.where(np.isnan(_ema200_v), 0.0, _ema200_v / _safe_cr - 1.0), -1.00, 1.00)
+
+    # MACD 가격 정규화: macd / close → 가격 수준과 무관한 모멘텀 강도
+    _macd_v, _macd_s_v, _macd_h_v = talib.MACD(_cr, fastperiod=12, slowperiod=26, signalperiod=9)
+    df['macd_r']        = np.clip(np.where(np.isnan(_macd_v),   0.0, _macd_v   / _safe_cr), -0.05, 0.05)
+    df['macd_signal_r'] = np.clip(np.where(np.isnan(_macd_s_v), 0.0, _macd_s_v / _safe_cr), -0.05, 0.05)
+    df['macd_hist_r']   = np.clip(np.where(np.isnan(_macd_h_v), 0.0, _macd_h_v / _safe_cr), -0.03, 0.03)
+
     # 불필요 원본 제거
     drop_cols = [c for c in df.columns if c.endswith('_raw')]
     df.drop(columns=drop_cols, inplace=True)
@@ -217,8 +240,17 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     df.reset_index(drop=True, inplace=True)  # dropna 후 인덱스 정합성 보장
 
     price_vol_cols = price_cols + vol_col
-    # market_phase: split 메타 컬럼이므로 모델 입력에서 제외
-    exclude_cols = ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200', 'market_phase']
+    # 절대 가격 수준 컬럼: 상대 버전(ema_*_r, macd_*_r)으로 대체되었으므로 제외
+    # bb_upper/middle/lower 도 절대 가격 → bb_pct/bb_width(상대 비율)만 유지
+    _abs_price_feat = [
+        'ema_20', 'ema_50', 'ema_200',
+        'bb_upper', 'bb_middle', 'bb_lower',
+        'macd', 'macd_signal', 'macd_hist',
+    ]
+    exclude_cols = (
+        ['timestamp', 'datetime', 'Target', '1h_ema_50', '1h_ema_200', 'market_phase']
+        + _abs_price_feat
+    )
     context_cols = [c for c in df.columns if c not in price_vol_cols + exclude_cols]
 
     if expert_type in ['long', 'short']:
@@ -252,10 +284,8 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
         total_valid_indices >= _val_end_pos + seq_length + horizon
     ]
 
-    # 언더샘플링 헬퍼: 강제 1:1 제거 → 최대 1:3 비율만 제한
-    # Focal Loss 가 Loss 단에서 클래스 불균형을 처리하므로 여기선 극단적 편향만 방어
-    MAX_NEG_RATIO = 3  # Pos 1 : Neg 최대 3
-
+    # 언더샘플링 헬퍼: 강제 1:1 제거 → 최대 1:_MAX_NEG_RATIO 비율로 제한
+    # BCEWithLogitsLoss pos_weight 와 동일 비율을 사용해 이중 보정을 방지합니다.
     def get_capped_indices(indices, target_array):
         sub_targets = target_array[indices]
         pos_idx = indices[np.where(sub_targets == 1.0)[0]]
@@ -264,7 +294,7 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
         if len(pos_idx) == 0 or len(neg_idx) == 0:
             return indices  # 한쪽 클래스가 비어 있으면 원본 그대로
 
-        max_neg = len(pos_idx) * MAX_NEG_RATIO
+        max_neg = len(pos_idx) * _MAX_NEG_RATIO
         if len(neg_idx) > max_neg:
             rng = np.random.default_rng(42)
             neg_idx = rng.choice(neg_idx, size=max_neg, replace=False)
@@ -299,12 +329,16 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     _n_pos = float((_raw_train_targets == 1.0).sum())
     _n_neg = float((_raw_train_targets == 0.0).sum())
     pos_weight_raw = _n_neg / (_n_pos + 1e-8)  # neg/pos 비율; 1보다 크면 양성 희소
+    _val_targets  = targets[val_indices]
+    _val_pos_pct  = float((_val_targets == 1.0).mean()) * 100 if len(_val_targets) > 0 else 0.0
     print(
         f"[INFO] 🎯 시계열 유지 분할 완료 "
-        f"(ATR 동적 임계치 | max_neg_ratio=1:{MAX_NEG_RATIO} | log_return) "
+        f"(ATR 동적 임계치 | max_neg_ratio=1:{_MAX_NEG_RATIO} | log_return) "
         f"(Train: {len(train_indices):,}, Val: {len(val_indices):,}) "
         f"| raw pos_weight={pos_weight_raw:.2f} "
-        f"(pos={int(_n_pos):,} neg={int(_n_neg):,})"
+        f"(pos={int(_n_pos):,} neg={int(_n_neg):,}) "
+        f"| Val 양성={_val_pos_pct:.1f}% "
+        f"({int((_val_targets==1.0).sum()):,}/{len(val_indices):,})"
     )
 
     return train_loader, val_loader, test_loader, features.shape[1], pos_weight_raw
