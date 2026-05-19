@@ -227,6 +227,21 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     raw_close = df['close_raw'].values.copy()
     raw_dates = pd.to_datetime(df['timestamp'], unit='ms', utc=True).values.copy()
 
+    # ── [Sync Fix 7] base_models.py 와 동일한 상대 지표 피처 생성 (_raw 제거 전) ──
+    # 훈련 시 context 피처 목록과 일치시키기 위해 반드시 여기서 계산합니다.
+    _cr_inf      = df['close_raw'].values.astype(np.float64)
+    _safe_cr_inf = np.where(_cr_inf > 0, _cr_inf, 1.0)
+    _e20  = talib.EMA(_cr_inf, timeperiod=20)
+    _e50  = talib.EMA(_cr_inf, timeperiod=50)
+    _e200 = talib.EMA(_cr_inf, timeperiod=200)
+    df['ema_20_r']  = np.clip(np.where(np.isnan(_e20),  0.0, _e20  / _safe_cr_inf - 1.0), -0.30, 0.30)
+    df['ema_50_r']  = np.clip(np.where(np.isnan(_e50),  0.0, _e50  / _safe_cr_inf - 1.0), -0.50, 0.50)
+    df['ema_200_r'] = np.clip(np.where(np.isnan(_e200), 0.0, _e200 / _safe_cr_inf - 1.0), -1.00, 1.00)
+    _mv, _msv, _mhv = talib.MACD(_cr_inf, fastperiod=12, slowperiod=26, signalperiod=9)
+    df['macd_r']        = np.clip(np.where(np.isnan(_mv),  0.0, _mv  / _safe_cr_inf), -0.05, 0.05)
+    df['macd_signal_r'] = np.clip(np.where(np.isnan(_msv), 0.0, _msv / _safe_cr_inf), -0.05, 0.05)
+    df['macd_hist_r']   = np.clip(np.where(np.isnan(_mhv), 0.0, _mhv / _safe_cr_inf), -0.03, 0.03)
+
     drop_cols = [c for c in df.columns if c.endswith('_raw')]
     df.drop(columns=drop_cols, inplace=True)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -237,8 +252,17 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     raw_dates = raw_dates[valid_mask]
 
     price_vol_cols = price_cols + vol_col
-    # market_phase: split 메타 컬럼이므로 모델 입력에서 제외
-    exclude_cols = ['timestamp', 'datetime', '1h_ema_50', '1h_ema_200', 'market_phase']
+    # [Sync Fix 7] base_models.py 의 exclude_cols 와 동일하게 유지해야
+    # 훈련 시 ContextExpert input_dim 과 추론 시 context_cols 길이가 일치합니다.
+    _abs_price_feat = [
+        'ema_20', 'ema_50', 'ema_200',
+        'bb_upper', 'bb_middle', 'bb_lower',
+        'macd', 'macd_signal', 'macd_hist',
+    ]
+    exclude_cols = (
+        ['timestamp', 'datetime', '1h_ema_50', '1h_ema_200', 'market_phase']
+        + _abs_price_feat
+    )
     if 'Target' in df.columns: exclude_cols.append('Target')
     context_cols = [c for c in df.columns if c not in price_vol_cols + exclude_cols]
 
@@ -292,9 +316,10 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
         for pv_batch, ctx_batch in zip(pv_loader, ctx_loader):
             pv_batch, ctx_batch = pv_batch.to(device), ctx_batch.to(device)
             
-            long_scores.extend(long_model(pv_batch).cpu().numpy())
-            short_scores.extend(short_model(pv_batch).cpu().numpy())
-            # [Sync Fix 6] ContextExpert는 logit 출력 → sigmoid로 확률 변환 후 저장
+            # [Sync Fix 7] 전 expert logit 출력 → sigmoid로 확률 변환 후 저장
+            # PriceActionExpert Sigmoid 제거(Fix 7)에 따라 long/short 도 sigmoid 필요
+            long_scores.extend(torch.sigmoid(long_model(pv_batch)).cpu().numpy())
+            short_scores.extend(torch.sigmoid(short_model(pv_batch)).cpu().numpy())
             context_scores.extend(torch.sigmoid(context_model(ctx_batch)).cpu().numpy())
 
     logger.info(f"[INFO] 추론 완료 ({time.time() - t0:.1f}초)")
