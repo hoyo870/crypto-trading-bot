@@ -69,12 +69,17 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     # 데이터 로드 (다운샘플링 적용됨)
     train_loader, val_loader, test_loader, input_dim, pos_weight = prepare_expert_data(data_path, expert_type, seq_length)
 
-    # 모델 선택
-    # [Fix 9] PriceActionExpert도 input_dim 동적 전달 (OHLCV 5 → OHLCV+context 23)
+    # [Fix 10] 전문가별 모델 설정 분기
+    # long/short: hidden_dim=128, dropout=0.4, lr=0.0007 (용량↑ + 정규화↑)
+    # context   : hidden_dim=64,  dropout=0.3, lr=0.001  (기존 유지 — 이미 0.598)
     if expert_type in ['long', 'short']:
-        model = PriceActionExpert(input_dim=input_dim, hidden_dim=64, dropout=0.3).to(device)
+        model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4).to(device)
+        _lr = 0.0007
+        _smooth_eps = 0.05   # label smoothing: 0→0.05, 1→0.95
     else:
         model = ContextExpert(input_dim=input_dim, hidden_dim=64, dropout=0.3).to(device)
+        _lr = 0.001
+        _smooth_eps = 0.0    # context는 label smoothing 미적용
 
     # 손실 함수: long/short는 FocalLoss(alpha=0.75, gamma=2.0), context는 BCEWithLogitsLoss
     # Focal Loss는 희소한 양성 클래스(long 신호 등)를 더 강하게 학습해 출력 범위를 확장합니다.
@@ -90,8 +95,11 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     # 정확히 상쇄되어 학습이 정지하는 문제를 방지합니다.
     _prior_logit = -float(torch.log(pos_w).item())  # sigmoid(prior_logit) = pos_rate
     model.fc[-1].bias.data.fill_(_prior_logit)
-    logger.info(f"  손실함수: BCEWithLogitsLoss(pos_weight={pos_w.item():.2f}) | raw pos_weight={pos_weight:.2f} | prior_logit={_prior_logit:.3f}")
-    optimizer = Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+    logger.info(
+        f"  손실함수: BCEWithLogitsLoss(pos_weight={pos_w.item():.2f}) | raw pos_weight={pos_weight:.2f} "
+        f"| prior_logit={_prior_logit:.3f} | lr={_lr} | smooth_eps={_smooth_eps}"
+    )
+    optimizer = Adam(model.parameters(), lr=_lr, weight_decay=1e-4)
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
     best_val_auc = -1.0
@@ -106,9 +114,11 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
             for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                 optimizer.zero_grad()
-                
+
                 predictions = model(X_batch)
-                loss = criterion(predictions, y_batch)
+                # [Fix 10] Label smoothing: 0→ε, 1→(1-ε)  (val은 hard label 유지)
+                _y_loss = y_batch * (1.0 - 2 * _smooth_eps) + _smooth_eps if _smooth_eps > 0 else y_batch
+                loss = criterion(predictions, _y_loss)
                 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

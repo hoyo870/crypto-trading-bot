@@ -285,13 +285,13 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     logger.info(f"[INFO] 3개의 전문가 모델 로딩 중...")
     model_dir = os.path.join(ROOT_DIR, "checkpoints", "base_experts")
 
-    # [Sync Fix 9] PriceActionExpert input_dim = price_vol(5) + context(18) = 23
+    # [Sync Fix 9/10] PriceActionExpert: input_dim=23, hidden_dim=128, dropout=0.4
     _pa_input_dim = len(price_vol_cols) + len(context_cols)
-    long_model = PriceActionExpert(input_dim=_pa_input_dim).to(device)
+    long_model = PriceActionExpert(input_dim=_pa_input_dim, hidden_dim=128, dropout=0.4).to(device)
     long_model.load_state_dict(torch.load(os.path.join(model_dir, "long_expert.pth"), map_location=device, weights_only=True))
     long_model.eval()
 
-    short_model = PriceActionExpert(input_dim=_pa_input_dim).to(device)
+    short_model = PriceActionExpert(input_dim=_pa_input_dim, hidden_dim=128, dropout=0.4).to(device)
     short_model.load_state_dict(torch.load(os.path.join(model_dir, "short_expert.pth"), map_location=device, weights_only=True))
     short_model.eval()
 

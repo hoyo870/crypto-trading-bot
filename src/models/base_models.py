@@ -63,12 +63,13 @@ class PriceActionExpert(nn.Module):
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers=2, batch_first=True, dropout=dropout)
         # [Fix 5] 시계열에 적합한 LayerNorm으로 교체 (BatchNorm1d 제거)
         self.ln = nn.LayerNorm(hidden_dim)
-        # [Fix 7] Sigmoid 제거 → BCEWithLogitsLoss 와 함께 사용 (ContextExpert 와 통일)
+        # [Fix 10] FC 중간층 = hidden_dim // 2 (hidden_dim 변경 시 자동 스케일)
+        _fc_dim = hidden_dim // 2
         self.fc = nn.Sequential(
-            nn.Linear(hidden_dim, 32),
+            nn.Linear(hidden_dim, _fc_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(32, 1),
+            nn.Linear(_fc_dim, 1),
         )
 
     def forward(self, x):
@@ -88,11 +89,13 @@ class ContextExpert(nn.Module):
         # [Fix 5] 시계열에 적합한 LayerNorm으로 교체 (BatchNorm1d 제거)
         self.ln = nn.LayerNorm(hidden_dim)
         # [Fix 6] Sigmoid 제거 → BCEWithLogitsLoss 와 함께 사용 (수치 안정성 향상)
+        # [Fix 10] FC 중간층 = hidden_dim // 2 (hidden_dim 변경 시 자동 스케일)
+        _fc_dim = hidden_dim // 2
         self.fc = nn.Sequential(
-            nn.Linear(hidden_dim, 32),
+            nn.Linear(hidden_dim, _fc_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(32, 1),
+            nn.Linear(_fc_dim, 1),
         )
 
     def forward(self, x):
