@@ -82,7 +82,14 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     pos_w_val = min(float(pos_weight), float(_MAX_NEG_RATIO))
     pos_w = torch.tensor([pos_w_val], device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
-    logger.info(f"  손실함수: BCEWithLogitsLoss(pos_weight={pos_w.item():.2f}) | raw pos_weight={pos_weight:.2f}")
+
+    # [Fix 8] 최종 FC 바이어스를 클래스 prior logit 으로 초기화
+    # pos_weight = neg/pos → prior_logit = log(pos_rate/(1-pos_rate)) = -log(pos_weight)
+    # 초기화 시 logit≈0 에서 기울기가 pos_weight*(0.5-1)*n_pos + 0.5*n_neg = 0 으로
+    # 정확히 상쇄되어 학습이 정지하는 문제를 방지합니다.
+    _prior_logit = -float(torch.log(pos_w).item())  # sigmoid(prior_logit) = pos_rate
+    model.fc[-1].bias.data.fill_(_prior_logit)
+    logger.info(f"  손실함수: BCEWithLogitsLoss(pos_weight={pos_w.item():.2f}) | raw pos_weight={pos_weight:.2f} | prior_logit={_prior_logit:.3f}")
     optimizer = Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
