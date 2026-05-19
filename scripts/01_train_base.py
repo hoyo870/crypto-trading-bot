@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.data import ConcatDataset, DataLoader
 from sklearn.metrics import f1_score, accuracy_score, roc_auc_score
 from copy import deepcopy
 import logging
@@ -18,7 +19,7 @@ if ROOT_DIR not in os.sys.path:
     os.sys.path.insert(0, ROOT_DIR)
 
 from src.models.base_models import PriceActionExpert, ContextExpert, prepare_expert_data, _MAX_NEG_RATIO
-from src.utils.platform_utils import get_device, configure_torch, log_platform_info
+from src.utils.platform_utils import get_device, configure_torch, log_platform_info, get_optimal_workers, get_pin_memory
 
 
 class FocalLoss(nn.Module):
@@ -55,7 +56,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("TrainBase")
 
-def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
+def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, extra_data_paths=None):
     start_time = time.time()
     _dev_str = get_device()
     configure_torch(_dev_str)
@@ -66,8 +67,32 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     logger.info(f"🚀 [{expert_type.upper()} EXPERT] 모델 훈련 시작 (Device: {device})")
     logger.info(f"{'='*50}")
 
-    # 데이터 로드 (다운샘플링 적용됨)
+    # 데이터 로드 (기본 심볼 - BTC, val/test 분할 기준)
     train_loader, val_loader, test_loader, input_dim, pos_weight = prepare_expert_data(data_path, expert_type, seq_length)
+
+    # [Fix 13] Multi-symbol: 추가 심볼의 train 데이터를 기본 심볼(BTC) train 데이터에 합산
+    # val/test는 BTC 기준 유지 → AUC 비교 일관성 보장
+    # 모든 피처가 가격 정규화됨(log_return, ratio 등) → 심볼 간 스케일 불일치 없음
+    if extra_data_paths:
+        _extra_datasets = []
+        for _ep in extra_data_paths:
+            if not os.path.exists(_ep):
+                logger.warning(f"[Multi-symbol] 파일 없음, 건너뜀: {_ep}")
+                continue
+            _extra_train_loader, _, _, _, _ = prepare_expert_data(_ep, expert_type, seq_length)
+            _extra_datasets.append(_extra_train_loader.dataset)
+        if _extra_datasets:
+            _combined = ConcatDataset([train_loader.dataset] + _extra_datasets)
+            _n_extra = sum(len(d) for d in _extra_datasets)
+            logger.info(
+                f"[Fix 13] Multi-symbol 훈련 데이터 합산: "
+                f"BTC({len(train_loader.dataset):,}) + 추가({_n_extra:,}) = 합계({len(_combined):,})"
+            )
+            train_loader = DataLoader(
+                _combined, batch_size=256, shuffle=True,
+                num_workers=get_optimal_workers(), pin_memory=get_pin_memory(),
+                persistent_workers=(get_optimal_workers() > 0)
+            )
 
     # [Fix 10] 전문가별 모델 설정 분기
     # [Fix 12] LONG/SHORT 아키텍처 분기:
@@ -216,6 +241,8 @@ if __name__ == "__main__":
     parser.add_argument("--seq-length", type=int, default=120, help="LSTM 시퀀스 길이")
     parser.add_argument("--epochs", type=int, default=50, help="최대 학습 에폭")
     parser.add_argument("--patience", type=int, default=7, help="조기 종료 인내심")
+    parser.add_argument("--multi-symbol", action="store_true",
+                        help="[Fix 13] BTC+ETH+SOL+XRP 4개 심볼 통합 훈련 (레짐 다양성 확보, val은 BTC 유지)")
     parser.add_argument(
         "--start-from",
         type=str,
@@ -241,7 +268,17 @@ if __name__ == "__main__":
         if _start_idx > 0:
             logger.info(f"[INFO] --start-from={args.start_from}: {_order[:_start_idx]} 전문가 건너뜀")
 
+        # [Fix 13] Multi-symbol: BTC 기본, ETH+SOL+XRP train 데이터 추가
+        _extra_syms = ['ETH_USDT', 'SOL_USDT', 'XRP_USDT'] if args.multi_symbol else []
+        _extra_paths = [
+            os.path.join(ROOT_DIR, "data", "processed", f"{s}_processed.csv")
+            for s in _extra_syms
+        ]
+        if args.multi_symbol:
+            logger.info(f"[Fix 13] Multi-symbol 모드: BTC(primary val) + {_extra_syms}")
+
         for _expert in _order[_start_idx:]:
-            train_expert(_expert, data_path, seq_length=args.seq_length, epochs=args.epochs, patience=args.patience)
+            train_expert(_expert, data_path, seq_length=args.seq_length, epochs=args.epochs,
+                         patience=args.patience, extra_data_paths=_extra_paths or None)
 
         logger.info("\n🎉 모든 Base 전문가 모델 훈련이 완료되었습니다!")
