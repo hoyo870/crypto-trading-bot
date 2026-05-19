@@ -287,11 +287,11 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
 
     # [Sync Fix 9/10] PriceActionExpert: input_dim=23, hidden_dim=128, dropout=0.4
     _pa_input_dim = len(price_vol_cols) + len(context_cols)
-    long_model = PriceActionExpert(input_dim=_pa_input_dim, hidden_dim=128, dropout=0.4).to(device)
+    long_model = PriceActionExpert(input_dim=_pa_input_dim, hidden_dim=128, dropout=0.4, use_attention=False).to(device)
     long_model.load_state_dict(torch.load(os.path.join(model_dir, "long_expert.pth"), map_location=device, weights_only=True))
     long_model.eval()
 
-    short_model = PriceActionExpert(input_dim=_pa_input_dim, hidden_dim=128, dropout=0.4).to(device)
+    short_model = PriceActionExpert(input_dim=_pa_input_dim, hidden_dim=128, dropout=0.4, use_attention=True).to(device)
     short_model.load_state_dict(torch.load(os.path.join(model_dir, "short_expert.pth"), map_location=device, weights_only=True))
     short_model.eval()
 

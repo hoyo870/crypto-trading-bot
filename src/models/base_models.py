@@ -57,12 +57,15 @@ class PriceActionExpert(nn.Module):
     입력 피처 수: price_vol(5) + context(18) = 23개 (input_dim으로 동적 결정)
     출력: logit (BCEWithLogitsLoss 와 함께 사용)
     """
-    def __init__(self, input_dim=5, hidden_dim=64, dropout=0.3):
+    def __init__(self, input_dim=5, hidden_dim=64, dropout=0.3, use_attention=False):
         super(PriceActionExpert, self).__init__()
         # [Fix 9] input_dim 동적 파라미터화 (OHLCV 5 → OHLCV+context 23)
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers=2, batch_first=True, dropout=dropout)
         # [Fix 5] 시계열에 적합한 LayerNorm으로 교체 (BatchNorm1d 제거)
         self.ln = nn.LayerNorm(hidden_dim)
+        # [Fix 12] use_attention=True 일 때만 attention 레이어 생성 (SHORT: True, LONG: False)
+        # SHORT는 Bear 기간 패턴 포착에 attention 효과적; LONG은 마지막 hidden state가 최적
+        self.attn = nn.Linear(hidden_dim, 1, bias=False) if use_attention else None
         # [Fix 10] FC 중간층 = hidden_dim // 2 (hidden_dim 변경 시 자동 스케일)
         _fc_dim = hidden_dim // 2
         self.fc = nn.Sequential(
@@ -73,8 +76,14 @@ class PriceActionExpert(nn.Module):
         )
 
     def forward(self, x):
-        out, _ = self.lstm(x)
-        feat = self.ln(out[:, -1, :])
+        out, _ = self.lstm(x)                                          # [B, T, H]
+        if self.attn is not None:
+            # [Fix 11/12] softmax attention: SHORT에서 특정 시점 패턴 집중
+            attn_w = torch.softmax(self.attn(out).squeeze(-1), dim=1) # [B, T]
+            feat = self.ln((attn_w.unsqueeze(-1) * out).sum(dim=1))   # [B, H]
+        else:
+            # LONG: 마지막 hidden state 사용 (Fix 10 방식, Bull→Bear 일반화 최적)
+            feat = self.ln(out[:, -1, :])                              # [B, H]
         return self.fc(feat).squeeze(1)
 
 class ContextExpert(nn.Module):

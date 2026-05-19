@@ -70,10 +70,16 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
     train_loader, val_loader, test_loader, input_dim, pos_weight = prepare_expert_data(data_path, expert_type, seq_length)
 
     # [Fix 10] 전문가별 모델 설정 분기
-    # long/short: hidden_dim=128, dropout=0.4, lr=0.0007 (용량↑ + 정규화↑)
-    # context   : hidden_dim=64,  dropout=0.3, lr=0.001  (기존 유지 — 이미 0.598)
-    if expert_type in ['long', 'short']:
-        model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4).to(device)
+    # [Fix 12] LONG/SHORT 아키텍처 분기:
+    #   LONG : use_attention=False (마지막 hidden state, Bull→Bear 일반화 최적), lr=0.001
+    #   SHORT: use_attention=True  (attention 활용, Bear 패턴 포착 +0.012 개선), lr=0.0007
+    #   CONTEXT: ContextExpert 그대로 유지
+    if expert_type == 'long':
+        model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=False).to(device)
+        _lr = 0.001
+        _smooth_eps = 0.05
+    elif expert_type == 'short':
+        model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=True).to(device)
         _lr = 0.0007
         _smooth_eps = 0.05   # label smoothing: 0→0.05, 1→0.95
     else:
@@ -100,7 +106,9 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7):
         f"| prior_logit={_prior_logit:.3f} | lr={_lr} | smooth_eps={_smooth_eps}"
     )
     optimizer = Adam(model.parameters(), lr=_lr, weight_decay=1e-4)
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
+    # [Fix 11] LONG은 초기 noisy val AUC로 LR이 조기 감소되는 문제 방지 (patience 3→5)
+    _sched_patience = 5 if expert_type == 'long' else 3
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=_sched_patience)
 
     best_val_auc = -1.0
     best_model_weights = None
