@@ -17,6 +17,14 @@ from src.utils.platform_utils import get_optimal_workers, get_pin_memory
 _PHASE_BULL_END = pd.Timestamp('2025-06-30 23:59:00')
 _PHASE_VAL_END  = pd.Timestamp('2025-10-31 23:59:00')
 
+# ── [Fix 19] LONG 전용 분할 경계 ─────────────────────────────────────────────
+# LONG은 Train=Bull, Val=Bear 도메인 시프트 문제 해결을 위해 별도 분할 사용
+# LONG Train: 2023-05 ~ 2024-06 (Bull 초중반)
+# LONG Val  : 2024-07 ~ 2025-06 (Bull 후반 + Bear 혼합 → Long 이벤트 충분)
+# LONG Test : 2025-07 ~
+_LONG_TRAIN_END = pd.Timestamp('2024-06-30 23:59:00')
+_LONG_VAL_END   = pd.Timestamp('2025-06-30 23:59:00')
+
 # ── 훈련 데이터 언더샘플링 상한 (Pos 1 : Neg 최대 N) ─────────────────────────
 # BCEWithLogitsLoss pos_weight 계산과 일치시켜 이중 보정을 방지합니다.
 _MAX_NEG_RATIO = 3

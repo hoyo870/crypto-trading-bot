@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 import torch
 import torch.nn as nn
 from torch.optim import Adam
@@ -99,6 +100,7 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
     #   LONG : use_attention=False (마지막 hidden state, Bull→Bear 일반화 최적), lr=0.001
     #   SHORT: use_attention=True  (attention 활용, Bear 패턴 포착 +0.012 개선), lr=0.0007
     #   CONTEXT: ContextExpert 그대로 유지
+    # [Fix 19 → 롤백] LONG hidden_dim=256 시도 실패 (hd=128 대비 AUC 낮음), hd=128 복원
     if expert_type == 'long':
         model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=False).to(device)
         _lr = 0.001
@@ -108,6 +110,7 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
         _lr = 0.0007
         _smooth_eps = 0.05   # label smoothing: 0→0.05, 1→0.95
     else:
+        # [Fix 10] CONTEXT: hidden_dim=64, dropout=0.3 (용량 추가 실험 없이 원래 설정이 최적)
         model = ContextExpert(input_dim=input_dim, hidden_dim=64, dropout=0.3).to(device)
         _lr = 0.001
         _smooth_eps = 0.0    # context는 label smoothing 미적용
@@ -218,17 +221,32 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
             f"(Epoch {_interrupted_epoch+1}). 현재까지 최고 모델을 저장합니다."
         )
 
-    # 최고 모델 저장
+    # 최고 모델 저장 (이전 best AUC보다 낮으면 덮어쓰지 않음 — Fix 17)
     model_dir = os.path.join(ROOT_DIR, "checkpoints", "base_experts")
     os.makedirs(model_dir, exist_ok=True)
     save_path = os.path.join(model_dir, f"{expert_type}_expert.pth")
+    meta_path = os.path.join(model_dir, f"{expert_type}_expert_meta.json")
+
+    # 이전 best AUC 로드
+    prev_best_auc = -1.0
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as _f:
+                prev_best_auc = json.load(_f).get('best_val_auc', -1.0)
+        except Exception:
+            pass
+
+    elapsed = time.time() - start_time
     if best_model_weights is not None:
-        torch.save(best_model_weights, save_path)
+        if best_val_auc > prev_best_auc:
+            torch.save(best_model_weights, save_path)
+            with open(meta_path, 'w') as _f:
+                json.dump({'best_val_auc': best_val_auc}, _f)
+            logger.info(f"✅ [{expert_type.upper()}] 훈련 완료 및 저장 (Best AUC: {best_val_auc:.4f}, 소요시간: {int(elapsed//60)}분 {int(elapsed%60)}초) -> {save_path}")
+        else:
+            logger.info(f"⚠️  [{expert_type.upper()}] 훈련 완료 (Best AUC: {best_val_auc:.4f} ≤ 이전 best {prev_best_auc:.4f}) — pth 유지, 소요시간: {int(elapsed//60)}분 {int(elapsed%60)}초")
     else:
         logger.warning(f"[⚠️] {expert_type.upper()} 저장할 모델 없음 (훈련 데이터 부족 또는 즉시 중단)")
-        
-    elapsed = time.time() - start_time
-    logger.info(f"✅ [{expert_type.upper()}] 훈련 완료 및 저장 (Best AUC: {best_val_auc:.4f}, 소요시간: {int(elapsed//60)}분 {int(elapsed%60)}초) -> {save_path}")
 
 
 if __name__ == "__main__":
@@ -253,6 +271,13 @@ if __name__ == "__main__":
             "예: --start-from short  (long_expert.pth 이미 존재 시 유용)"
         ),
     )
+    parser.add_argument(
+        "--only",
+        type=str,
+        choices=["long", "short", "context"],
+        default=None,
+        help="지정한 전문가한 가지만 훈련 (Fix 19: LONG 단독 훈련 등)",
+    )
     args = parser.parse_args()
 
     data_path = args.data_path or os.path.join(
@@ -264,9 +289,15 @@ if __name__ == "__main__":
         logger.info(f"학습 대상 심볼: {args.symbol} | 데이터: {data_path}")
 
         _order = ["long", "short", "context"]
-        _start_idx = _order.index(args.start_from) if args.start_from else 0
-        if _start_idx > 0:
-            logger.info(f"[INFO] --start-from={args.start_from}: {_order[:_start_idx]} 전문가 건너뜀")
+        # [Fix 19] --only 플래그: 단일 전문가만 훈련
+        if args.only:
+            _order = [args.only]
+            logger.info(f"[Fix 19] --only={args.only}: {args.only} 전문가만 훈련")
+            _start_idx = 0
+        else:
+            _start_idx = _order.index(args.start_from) if args.start_from else 0
+            if _start_idx > 0:
+                logger.info(f"[INFO] --start-from={args.start_from}: {_order[:_start_idx]} 전문가 건너뜀")
 
         # [Fix 13] Multi-symbol: BTC 기본, ETH+SOL+XRP train 데이터 추가
         _extra_syms = ['ETH_USDT', 'SOL_USDT', 'XRP_USDT'] if args.multi_symbol else []
@@ -278,7 +309,10 @@ if __name__ == "__main__":
             logger.info(f"[Fix 13] Multi-symbol 모드: BTC(primary val) + {_extra_syms}")
 
         for _expert in _order[_start_idx:]:
+            # [Fix 14] LONG은 multi-symbol 제외: 4배 데이터 시 양성 예측 고착 발생 확인
+            # SHORT/CONTEXT는 multi-symbol로 레짐 다양성 확보
+            _ep = _extra_paths if (args.multi_symbol and _expert != 'long') else []
             train_expert(_expert, data_path, seq_length=args.seq_length, epochs=args.epochs,
-                         patience=args.patience, extra_data_paths=_extra_paths or None)
+                         patience=args.patience, extra_data_paths=_ep or None)
 
         logger.info("\n🎉 모든 Base 전문가 모델 훈련이 완료되었습니다!")
