@@ -100,11 +100,12 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
     #   LONG : use_attention=False (마지막 hidden state, Bull→Bear 일반화 최적), lr=0.001
     #   SHORT: use_attention=True  (attention 활용, Bear 패턴 포착 +0.012 개선), lr=0.0007
     #   CONTEXT: ContextExpert 그대로 유지
-    # [Fix 21] LONG: dropout 0.4→0.3 (과소적합 완화), smooth_eps 0.05→0.0 (Bear val에서 방해 제거)
+    # [Fix 24] LONG: 원래 설정 복원 (attn=False, dp=0.4, smooth=0.05, lr=0.001)
+    # CosineAnnealingLR로 교체 → LR 주기적 재상승으로 local minimum 탈출 시도
     if expert_type == 'long':
-        model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.3, use_attention=False).to(device)
+        model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=False).to(device)
         _lr = 0.001
-        _smooth_eps = 0.0
+        _smooth_eps = 0.05
     elif expert_type == 'short':
         model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=True).to(device)
         _lr = 0.0007
@@ -134,9 +135,13 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
         f"| prior_logit={_prior_logit:.3f} | lr={_lr} | smooth_eps={_smooth_eps}"
     )
     optimizer = Adam(model.parameters(), lr=_lr, weight_decay=1e-4)
-    # [Fix 11] LONG은 초기 noisy val AUC로 LR이 조기 감소되는 문제 방지 (patience 3→5)
-    _sched_patience = 5 if expert_type == 'long' else 3
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=_sched_patience)
+    # [Fix 25] LONG: CosineAnnealingWarmRestarts (T_0=30, T_mult=2) → LR 주기적 재상승
+    # Fix 24 CosineAnnealingLR(T_max=100)에서 0.5411 달성 → WarmRestarts로 plateau 재돌파 시도
+    if expert_type == 'long':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=30, T_mult=2, eta_min=1e-5)
+    else:
+        _sched_patience = 3
+        scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=_sched_patience)
 
     best_val_auc = -1.0
     best_model_weights = None
@@ -202,7 +207,11 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
                 f"| Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f} | Val AUC: {val_auc:.4f}{trivial_flag}"
             )
 
-            scheduler.step(val_auc)
+            # [Fix 24] CosineAnnealingLR(LONG)은 인자 없이 step(), ReduceLROnPlateau는 val_auc 전달
+            if expert_type == 'long':
+                scheduler.step()
+            else:
+                scheduler.step(val_auc)
 
             if val_auc > best_val_auc:
                 best_val_auc = val_auc
