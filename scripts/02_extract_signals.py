@@ -357,7 +357,7 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
             f"train={split_counts.get('train',0):,}, "
             f"val={split_counts.get('val',0):,}, "
             f"test={split_counts.get('test',0):,}. "
-            "RL 학습 시에는 split='test' 행만 사용하세요."
+            "RL 학습 시에는 split='val'+'test' (OOS) 행만 사용하세요."
         )
 
     output_dir = os.path.join(ROOT_DIR, "data", "signals")
