@@ -271,8 +271,10 @@ if __name__ == "__main__":
     parser.add_argument("--data-path", type=str, default=None,
                         help="processed CSV 경로 (미지정 시 --symbol 기반 자동 생성)")
     parser.add_argument("--seq-length", type=int, default=120, help="LSTM 시퀀스 길이")
-    parser.add_argument("--epochs", type=int, default=50, help="최대 학습 에폭")
-    parser.add_argument("--patience", type=int, default=7, help="조기 종료 인내심")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="최대 학습 에폭 (미지정 시 전문가별 자동: long=100, short=60, context=60)")
+    parser.add_argument("--patience", type=int, default=None,
+                        help="조기 종료 인내심 (미지정 시 전문가별 자동: long=20, short=10, context=10)")
     parser.add_argument("--multi-symbol", action="store_true",
                         help="[Fix 13] BTC+ETH+SOL+XRP 4개 심볼 통합 훈련 (레짐 다양성 확보, val은 BTC 유지)")
     parser.add_argument(
@@ -322,11 +324,18 @@ if __name__ == "__main__":
         if args.multi_symbol:
             logger.info(f"[Fix 13] Multi-symbol 모드: BTC(primary val) + {_extra_syms}")
 
+        # 전문가별 기본 epochs/patience (검증된 최적값)
+        # --epochs / --patience 명시 시 해당 값으로 전체 전문가에 일괄 적용
+        _default_epochs   = {'long': 100, 'short': 60, 'context': 60}
+        _default_patience = {'long': 20,  'short': 10, 'context': 10}
+
         for _expert in _order[_start_idx:]:
-            # [Fix 14] LONG은 multi-symbol 제외: 4배 데이터 시 양성 예측 고착 발생 확인
+            # LONG은 multi-symbol 제외: 4배 데이터 시 양성 예측 고착 발생 확인
             # SHORT/CONTEXT는 multi-symbol로 레짐 다양성 확보
             _ep = _extra_paths if (args.multi_symbol and _expert != 'long') else []
-            train_expert(_expert, data_path, seq_length=args.seq_length, epochs=args.epochs,
-                         patience=args.patience, extra_data_paths=_ep or None)
+            _ep_epochs   = args.epochs   if args.epochs   is not None else _default_epochs[_expert]
+            _ep_patience = args.patience if args.patience is not None else _default_patience[_expert]
+            train_expert(_expert, data_path, seq_length=args.seq_length, epochs=_ep_epochs,
+                         patience=_ep_patience, extra_data_paths=_ep or None)
 
         logger.info("\n🎉 모든 Base 전문가 모델 훈련이 완료되었습니다!")
