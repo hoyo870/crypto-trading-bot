@@ -508,7 +508,9 @@ def main() -> None:
     df["short_z"] = zscore_transform(df["short_score"], ref_mask)
     print(f"[Z-score] 기준 split={ref_split}  "
           f"long_score: μ={df.loc[ref_mask,'long_score'].mean():.5f}  "
-          f"σ={df.loc[ref_mask,'long_score'].std():.5f}")
+          f"σ={df.loc[ref_mask,'long_score'].std():.5f}  "
+          f"short_score: μ={df.loc[ref_mask,'short_score'].mean():.5f}  "
+          f"σ={df.loc[ref_mask,'short_score'].std():.5f}")
 
     # ── split 필터링 (백테스트 대상) ─────────────────────────────────────────
     if args.split == "all":

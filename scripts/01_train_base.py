@@ -100,11 +100,11 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
     #   LONG : use_attention=False (마지막 hidden state, Bull→Bear 일반화 최적), lr=0.001
     #   SHORT: use_attention=True  (attention 활용, Bear 패턴 포착 +0.012 개선), lr=0.0007
     #   CONTEXT: ContextExpert 그대로 유지
-    # [Fix 19 → 롤백] LONG hidden_dim=256 시도 실패 (hd=128 대비 AUC 낮음), hd=128 복원
+    # [Fix 21] LONG: dropout 0.4→0.3 (과소적합 완화), smooth_eps 0.05→0.0 (Bear val에서 방해 제거)
     if expert_type == 'long':
-        model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=False).to(device)
+        model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.3, use_attention=False).to(device)
         _lr = 0.001
-        _smooth_eps = 0.05
+        _smooth_eps = 0.0
     elif expert_type == 'short':
         model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=True).to(device)
         _lr = 0.0007
