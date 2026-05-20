@@ -98,10 +98,10 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
     # ── 전문가별 모델 / 하이퍼파라미터 (검증된 최적값) ────────────────────────────
     # LONG   : hd=128, attn=False, dp=0.4, lr=0.001,  smooth=0.05 → best Val AUC 0.5411
     #          권장 실행: --only long  --epochs 100 --patience 20
-    # SHORT  : hd=128, attn=True,  dp=0.4, lr=0.0007, smooth=0.05 → best Val AUC 0.5902
+    # SHORT  : hd=128, attn=True,  dp=0.4, lr=0.0007, smooth=0.05 → best Val AUC 0.5922
     #          권장 실행: --only short --epochs 60  --patience 10
-    # CONTEXT: hd=64,  ContextExpert,       lr=0.001,  smooth=0.0  → best Val AUC 0.5986
-    #          권장 실행: --only context --epochs 60  --patience 10
+    # CONTEXT: hd=64,  ContextExpert,       lr=0.001,  smooth=0.0  → best Val AUC 0.6001
+    #          권장 실행: --only context --epochs 100 --patience 20
     if expert_type == 'long':
         model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=False).to(device)
         _lr = 0.001
@@ -139,8 +139,8 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
     # LONG   : CosineAnnealingLR(T_max=epochs, eta_min=1e-5)
     #          epochs 주기로 LR 코사인 감소 → Val AUC 0.5411 달성 (epochs=100, patience=20)
     #          ReduceLROnPlateau 대비 +0.004, WarmRestarts(T_0=30) 대비 +0.002 우위
-    # SHORT  : ReduceLROnPlateau(patience=3, factor=0.5) → Val AUC 0.5902 달성
-    # CONTEXT: ReduceLROnPlateau(patience=3, factor=0.5) → Val AUC 0.5986 달성
+    # SHORT  : ReduceLROnPlateau(patience=3, factor=0.5) → Val AUC 0.5922 달성
+    # CONTEXT: ReduceLROnPlateau(patience=3, factor=0.5) → Val AUC 0.6001 달성 (epochs=100, patience=20)
     if expert_type == 'long':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
     else:
@@ -326,8 +326,8 @@ if __name__ == "__main__":
 
         # 전문가별 기본 epochs/patience (검증된 최적값)
         # --epochs / --patience 명시 시 해당 값으로 전체 전문가에 일괄 적용
-        _default_epochs   = {'long': 100, 'short': 60, 'context': 60}
-        _default_patience = {'long': 20,  'short': 10, 'context': 10}
+        _default_epochs   = {'long': 100, 'short': 60, 'context': 100}
+        _default_patience = {'long': 20,  'short': 10, 'context': 20}
 
         for _expert in _order[_start_idx:]:
             # LONG은 multi-symbol 제외: 4배 데이터 시 양성 예측 고착 발생 확인
