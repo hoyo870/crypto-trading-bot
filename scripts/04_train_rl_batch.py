@@ -88,6 +88,8 @@ def run_parallel_orchestrator(args):
             if args.load_model:
                 cmd.extend(["--load-model", args.load_model])
             cmd.extend(["--n-envs", str(args.n_envs)])
+            if args.multi_symbol:
+                cmd.append("--multi-symbol")
                 
             logger.info(f"▶️ [START] 레버리지: {lev}x | 프로파일: {prof:<10} | 시드 투입: {args.count_per_task}개")
             
@@ -152,11 +154,19 @@ if __name__ == "__main__":
     parser.add_argument("--load-model", type=str, default=None, help="(파인튜닝용) 부모 모델 zip 경로")
     parser.add_argument("--n-envs", type=int, default=4,
                         help="DummyVecEnv 병렬 환경 수 (기본=4). CPU 소형 MLP 최적값.")
-    
+    parser.add_argument(
+        "--multi-symbol", action="store_true", default=False,
+        help="BTC/ETH/SOL/XRP 4개 심볼 신호를 모두 사용해 학습합니다 (데이터 다양성 확보).\n"
+             "활성화 시 --data-path는 eval 환경(BTC 기준)에만 사용됩니다."
+    )
+
     args = parser.parse_args()
-    
+
     # 환경변수가 있으면 우선 적용 (run_evolution.py 호환성)
-    args.model_dir = os.environ.get("CUSTOM_MODEL_DIR", args.model_dir)
-    args.log_dir = os.environ.get("CUSTOM_LOG_DIR", args.log_dir)
+    args.model_dir  = os.environ.get("CUSTOM_MODEL_DIR",  args.model_dir)
+    args.log_dir    = os.environ.get("CUSTOM_LOG_DIR",    args.log_dir)
+    args.data_path  = os.environ.get("CUSTOM_DATA_PATH",  args.data_path)
+    if os.environ.get("MULTI_SYMBOL", "").lower() in ("1", "true", "yes"):
+        args.multi_symbol = True
     
     run_parallel_orchestrator(args)

@@ -290,6 +290,8 @@ def run_evolution_pipeline(args):
             train_cmd.extend(["--load-model", parent_model_path])
         if args.data_path:
             train_cmd.extend(["--data-path", args.data_path])
+        if args.multi_symbol:
+            train_cmd.append("--multi-symbol")
 
         # 04_train_rl_batch.py에 환경 변수로 현재 세대 경로를 넘겨줌
         env_vars = os.environ.copy()
@@ -299,6 +301,8 @@ def run_evolution_pipeline(args):
         env_vars["PYTHONIOENCODING"] = "utf-8"
         if args.data_path:
             env_vars["CUSTOM_DATA_PATH"] = args.data_path
+        if args.multi_symbol:
+            env_vars["MULTI_SYMBOL"] = "1"
         
         # 04_train 스크립트 실행 (백테스트는 파이프라인에서 직접 통제하므로 no-backtest 옵션 추가 요망)
         result = subprocess.run(train_cmd, env=env_vars, cwd=ROOT_DIR)
@@ -507,6 +511,11 @@ if __name__ == "__main__":
                         help="RL 훈련/백테스트 데이터 CSV 경로\n"
                              "미지정 시 data/signals/base_signals_log.csv 사용 (BTC_USDT val+test)\n"
                              "다른 코인 예: data/signals/ETH_USDT_signals_log.csv")
+    parser.add_argument(
+        "--multi-symbol", action="store_true", default=False,
+        help="BTC/ETH/SOL/XRP 4개 심볼 신호를 모두 사용해 학습합니다 (데이터 다양성 확보).\n"
+             "활성화 시 각 심볼의 {SYM}_signals_log.csv 가 최신 BASE 모델로 재추출돼 있어야 합니다."
+    )
     parser.add_argument("--mutation-scale-start", type=float, default=1.0,
                         help="초기 변이 폭 스케일 (1.0=최대, 세대마다 0.1 감소, 최소 0.3)")
     parser.add_argument("--disable-parent-gate", action="store_true",
