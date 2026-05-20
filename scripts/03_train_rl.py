@@ -59,6 +59,35 @@ from src.utils.platform_utils import configure_torch
 configure_torch("cpu")
 
 
+# ── 신호 신선도 체크 ───────────────────────────────────────────────────────
+def _check_signal_freshness(data_path: str) -> None:
+    """BASE 모델 .pth 가 신호 CSV보다 최신이면 재추출 경고를 출력합니다."""
+    if not os.path.exists(data_path):
+        return
+    model_dir = os.path.join(ROOT_DIR, "checkpoints", "base_experts")
+    pth_files  = ["long_expert.pth", "short_expert.pth", "context_expert.pth"]
+    sig_mtime  = os.path.getmtime(data_path)
+    stale = [p for p in pth_files
+             if os.path.exists(os.path.join(model_dir, p))
+             and os.path.getmtime(os.path.join(model_dir, p)) > sig_mtime]
+    if stale:
+        sig_time   = time.strftime('%Y-%m-%d %H:%M', time.localtime(sig_mtime))
+        model_time = time.strftime('%Y-%m-%d %H:%M',
+                                   time.localtime(max(
+                                       os.path.getmtime(os.path.join(model_dir, p))
+                                       for p in stale
+                                   )))
+        logger.warning(
+            f"[WARN] BASE 모델이 신호 파일보다 최신입니다!\n"
+            f"  신호 파일: {data_path}  ({sig_time})\n"
+            f"  최신 모델: {stale}  ({model_time})\n"
+            f"  재추출 권장: python scripts/02_extract_signals.py --symbol BTC_USDT\n"
+            f"  (멀티심볼: ETH_USDT / SOL_USDT / XRP_USDT 도 동일하게 실행)"
+        )
+    else:
+        logger.info(f"[OK] 신호 파일 신선도 확인 완료: {os.path.basename(data_path)}")
+
+
 # ── 하이퍼파라미터 프로파일 ────────────────────────────────────────────────
 PPO_TUNING_PROFILES = {
     "stable": {
@@ -356,7 +385,7 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
               data_path, model_dir, log_dir,
               total_timesteps, eval_freq, patience, reward_target,
               entropy_threshold, no_improve_start_ratio,
-              mutation_scale=1.0, n_envs=1):
+              mutation_scale=1.0, n_envs=1, multi_symbol_paths=None):
     """seed 1개에 대한 PPO 훈련을 수행하고 저장합니다."""
     start = time.time()
     logger.info(f"  ▶ [{model_tag}] seed={seed} | lev={leverage}x | profile={tuning_profile} | n_envs={n_envs}")
@@ -365,29 +394,64 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
     hp = dict(PPO_TUNING_PROFILES[tuning_profile])
 
     # CSV 1회 로드 → 모든 환경(DummyVecEnv 포함) 에서 재사용 (중복 I/O 방지)
-    df_shared = pd.read_csv(data_path)
-    logger.info(f"    CSV 로드 완료: {data_path} ({len(df_shared)}행)")
+    # multi_symbol_paths 지정 시 각 심볼별 DF 로드 → 환경 분산 (데이터 다양성 확보)
+    if multi_symbol_paths:
+        dfs = []
+        for p in multi_symbol_paths:
+            if os.path.exists(p):
+                _df = pd.read_csv(p)
+                dfs.append(_df)
+                logger.info(f"    멀티심볼 로드: {p} ({len(_df):,}행)")
+            else:
+                logger.warning(f"    [WARN] 신호 파일 없음 (제외): {p}")
+        if not dfs:
+            raise FileNotFoundError("지정된 멀티심볼 신호 파일을 하나도 찾지 못했습니다.")
+        logger.info(f"    멀티심볼 총 {len(dfs)}개 심볼 로드 완료")
+    else:
+        df_shared = pd.read_csv(data_path)
+        logger.info(f"    CSV 로드 완료: {data_path} ({len(df_shared):,}행)")
+        dfs = [df_shared]
+
+    def mask_fn(env): return env.action_masks()
 
     if n_envs > 1:
         # DummyVecEnv: 동일 프로세스 내 N개 환경을 배치 처리
         # 롤아웃 inference가 batch=N으로 묶여 Python 오버헤드 대폭 감소
-        def mask_fn(env): return env.action_masks()
-        def _make_train_env():
-            e = LeverageTradingEnv(df=df_shared, leverage=leverage, mode="train")
-            return Monitor(ActionMasker(e, mask_fn))
-        train_env = DummyVecEnv([_make_train_env] * n_envs)
-        # n_steps를 n_envs로 나눠 유효 롤아웃 버퍼 크기를 동일하게 유지
         hp["n_steps"] = max(64, hp["n_steps"] // n_envs)
         logger.info(f"    DummyVecEnv: n_envs={n_envs}, n_steps(per env)={hp['n_steps']}")
+        if len(dfs) > 1:
+            # 멀티심볼: 심볼별로 n_envs를 균등 배분 (각 환경이 단일 심볼만 사용)
+            n_per_sym = max(1, n_envs // len(dfs))
+            remainder = n_envs - n_per_sym * len(dfs)
+            env_factories = []
+            for idx, _df in enumerate(dfs):
+                count = n_per_sym + (1 if idx < remainder else 0)
+                for _ in range(count):
+                    def _make(_d=_df):
+                        def _init():
+                            e = LeverageTradingEnv(df=_d, leverage=leverage, mode="train")
+                            return Monitor(ActionMasker(e, mask_fn))
+                        return _init
+                    env_factories.append(_make())
+            train_env = DummyVecEnv(env_factories)
+            logger.info(
+                f"    멀티심볼 DummyVecEnv: {len(dfs)}심볼 × ~{n_per_sym}환경 "
+                f"= {len(env_factories)}개"
+            )
+        else:
+            def _make_train_env():
+                e = LeverageTradingEnv(df=dfs[0], leverage=leverage, mode="train")
+                return Monitor(ActionMasker(e, mask_fn))
+            train_env = DummyVecEnv([_make_train_env] * n_envs)
     else:
-        def mask_fn(env): return env.action_masks()
         train_env = Monitor(
-            ActionMasker(LeverageTradingEnv(df=df_shared, leverage=leverage, mode="train"), mask_fn)
+            ActionMasker(LeverageTradingEnv(df=dfs[0], leverage=leverage, mode="train"), mask_fn)
         )
 
+    # eval 환경: 첫 번째 심볼(BTC 기준)로 일관된 평가
     def mask_fn_eval(env): return env.action_masks()
     eval_env = Monitor(
-        ActionMasker(LeverageTradingEnv(df=df_shared, leverage=leverage, mode="eval"), mask_fn_eval)
+        ActionMasker(LeverageTradingEnv(df=dfs[0], leverage=leverage, mode="eval"), mask_fn_eval)
     )
 
     if load_model_path and os.path.exists(load_model_path):
@@ -520,6 +584,7 @@ def run_train_batch(args):
             no_improve_start_ratio=args.no_improve_start_ratio,
             mutation_scale=args.mutation_scale,
             n_envs=args.n_envs,
+            multi_symbol_paths=getattr(args, 'multi_symbol_paths', None),
         )
         tags_created.append(tag)
         total_elapsed = int(time.time() - batch_start)
@@ -568,6 +633,12 @@ if __name__ == "__main__":
     parser.add_argument("--n-envs", type=int, default=4,
                         help="DummyVecEnv 병렬 환경 수 (기본=4). 1=단일 환경.\n"
                              "n_steps를 n_envs로 나눠 유효 버퍼 크기를 유지합니다.")
+    parser.add_argument(
+        "--multi-symbol", action="store_true", default=False,
+        help="BTC/ETH/SOL/XRP 4개 심볼 신호를 모두 사용해 학습합니다 (데이터 다양성 확보).\n"
+             "활성화 시 n_envs를 심볼 수로 균등 분배하며, eval은 BTC 기준으로 수행합니다.\n"
+             "전제: 각 심볼의 {SYM}_signals_log.csv 가 최신 BASE 모델로 재추출돼 있어야 합니다."
+    )
 
     default_data  = os.path.join(ROOT_DIR, "data", "signals", "base_signals_log.csv")
     default_model = os.path.join(ROOT_DIR, "checkpoints", "rl_generations")
@@ -586,5 +657,21 @@ if __name__ == "__main__":
 
     if not os.path.exists(args.data_path):
         raise FileNotFoundError(f"데이터 파일 없음: {args.data_path}")
+
+    # ── 멀티심볼 경로 결정 ──────────────────────────────────────────────────
+    if args.multi_symbol:
+        _symbols = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT"]
+        _sig_dir = os.path.join(ROOT_DIR, "data", "signals")
+        args.multi_symbol_paths = [
+            os.path.join(_sig_dir, f"{sym}_signals_log.csv") for sym in _symbols
+        ]
+        # eval 기준 파일도 BTC로 동기화
+        args.data_path = args.multi_symbol_paths[0]
+        logger.info(f"멀티심볼 모드 활성화: {_symbols}")
+        for p in args.multi_symbol_paths:
+            _check_signal_freshness(p)
+    else:
+        args.multi_symbol_paths = None
+        _check_signal_freshness(args.data_path)
 
     run_train_batch(args)

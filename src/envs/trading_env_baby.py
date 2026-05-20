@@ -98,36 +98,62 @@ class BabyLeverageTradingEnv(gym.Env):
         self.tuning_profile = tuning_profile
         self.mode = mode  # "train" | "eval" | None
 
+        self.max_steps = n - 1
+
+        # ── Train/Eval 데이터 구간 분리 ───────────────────────────────────
+        # split 컬럼이 있으면 날짜 기반 분할 (BASE 모델 경계와 정합)
+        # 없으면 비율 기반 fallback (하위 호환)
+        _used_split_col = False
+        if 'split' in df.columns and mode in ("train", "eval"):
+            # split 컬럼 매핑:
+            #   mode='train' → split='val'  (BASE 모델 OOS-easy 구간, 신호 신뢰 높음)
+            #   mode='eval'  → split='test' (BASE 모델 완전 OOS 구간, 실전 검증)
+            # BASE 모델이 가중치를 업데이트한 'train' 구간은 in-sample → 제외
+            _target = "val" if mode == "train" else "test"
+            _indices = np.where(df['split'].values == _target)[0]
+            if len(_indices) >= MIN_EP_STEPS:
+                self._step_lo = int(_indices[0])
+                self._step_hi = int(_indices[-1]) + 1
+                _used_split_col = True
+            else:
+                warnings.warn(
+                    f"[BabyEnv] split='{_target}' 구간이 너무 짧습니다 "
+                    f"({len(_indices)}행 < MIN_EP_STEPS={MIN_EP_STEPS}). "
+                    f"비율 기반 분할로 fallback합니다.",
+                    UserWarning,
+                )
+
+        if not _used_split_col:
+            if mode == "train":
+                self._step_lo = 0
+                self._step_hi = int(n * train_ratio)
+            elif mode == "eval":
+                self._step_lo = int(n * train_ratio)
+                self._step_hi = int(n * (train_ratio + eval_ratio))
+                # eval 구간 최소 길이 검증
+                eval_size = self._step_hi - self._step_lo
+                if eval_size < MIN_EP_STEPS:
+                    warnings.warn(
+                        f"[BabyEnv] eval 구간이 너무 짧습니다 "
+                        f"({eval_size}행 < MIN_EP_STEPS={MIN_EP_STEPS}). "
+                        f"전체 구간으로 fallback합니다.",
+                        UserWarning,
+                    )
+                    self._step_lo = 0
+                    self._step_hi = n
+            else:  # None: 백테스트 등 전체 구간 사용
+                self._step_lo = 0
+                self._step_hi = n
+
+        _split_info = (f"split_col={_used_split_col}  "
+                       f"rows={self._step_hi - self._step_lo:,}"
+                       if mode in ("train", "eval") else "full")
         data_source = f"path={data_path}" if data_path else "df=<provided>"
         print(f"[INFO] BabyLeverageTradingEnv v1 lev={int(self.leverage)}x  "
               f"liq_at={1/self.leverage*100:.0f}%raw  "
               f"max_hold={self.max_hold_steps}bars  "
               f"LIQ_PENALTY={LIQ_PENALTY}  mode={mode or 'full'}  "
-              f"split={train_ratio}/{eval_ratio}  {data_source}")
-
-        self.max_steps = n - 1
-
-        # ── Train/Eval 데이터 구간 분리 ───────────────────────────────────
-        if mode == "train":
-            self._step_lo = 0
-            self._step_hi = int(n * train_ratio)
-        elif mode == "eval":
-            self._step_lo = int(n * train_ratio)
-            self._step_hi = int(n * (train_ratio + eval_ratio))
-            # eval 구간 최소 길이 검증
-            eval_size = self._step_hi - self._step_lo
-            if eval_size < MIN_EP_STEPS:
-                warnings.warn(
-                    f"[BabyEnv] eval 구간이 너무 짧습니다 "
-                    f"({eval_size}행 < MIN_EP_STEPS={MIN_EP_STEPS}). "
-                    f"전체 구간으로 fallback합니다.",
-                    UserWarning,
-                )
-                self._step_lo = 0
-                self._step_hi = n
-        else:  # None: 백테스트 등 전체 구간 사용
-            self._step_lo = 0
-            self._step_hi = n
+              f"{_split_info}  {data_source}")
 
         self.closes         = df['close'].values.astype(np.float32)
         # Fix1: z-정규화 — raw score 범위(~0.025)를 관측 공간 [-1,1]에 고르게 분포
