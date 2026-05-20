@@ -95,13 +95,13 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
                 persistent_workers=(get_optimal_workers() > 0)
             )
 
-    # [Fix 10] 전문가별 모델 설정 분기
-    # [Fix 12] LONG/SHORT 아키텍처 분기:
-    #   LONG : use_attention=False (마지막 hidden state, Bull→Bear 일반화 최적), lr=0.001
-    #   SHORT: use_attention=True  (attention 활용, Bear 패턴 포착 +0.012 개선), lr=0.0007
-    #   CONTEXT: ContextExpert 그대로 유지
-    # [Fix 24] LONG: 원래 설정 복원 (attn=False, dp=0.4, smooth=0.05, lr=0.001)
-    # CosineAnnealingLR로 교체 → LR 주기적 재상승으로 local minimum 탈출 시도
+    # ── 전문가별 모델 / 하이퍼파라미터 (검증된 최적값) ────────────────────────────
+    # LONG   : hd=128, attn=False, dp=0.4, lr=0.001,  smooth=0.05 → best Val AUC 0.5411
+    #          권장 실행: --only long  --epochs 100 --patience 20
+    # SHORT  : hd=128, attn=True,  dp=0.4, lr=0.0007, smooth=0.05 → best Val AUC 0.5902
+    #          권장 실행: --only short --epochs 60  --patience 10
+    # CONTEXT: hd=64,  ContextExpert,       lr=0.001,  smooth=0.0  → best Val AUC 0.5986
+    #          권장 실행: --only context --epochs 60  --patience 10
     if expert_type == 'long':
         model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=False).to(device)
         _lr = 0.001
@@ -111,10 +111,10 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
         _lr = 0.0007
         _smooth_eps = 0.05   # label smoothing: 0→0.05, 1→0.95
     else:
-        # [Fix 10] CONTEXT: hidden_dim=64, dropout=0.3 (용량 추가 실험 없이 원래 설정이 최적)
+        # CONTEXT: hidden_dim=64, dropout=0.3
         model = ContextExpert(input_dim=input_dim, hidden_dim=64, dropout=0.3).to(device)
         _lr = 0.001
-        _smooth_eps = 0.0    # context는 label smoothing 미적용
+        _smooth_eps = 0.0    # label smoothing 미적용
 
     # 손실 함수: long/short는 FocalLoss(alpha=0.75, gamma=2.0), context는 BCEWithLogitsLoss
     # Focal Loss는 희소한 양성 클래스(long 신호 등)를 더 강하게 학습해 출력 범위를 확장합니다.
@@ -135,10 +135,14 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
         f"| prior_logit={_prior_logit:.3f} | lr={_lr} | smooth_eps={_smooth_eps}"
     )
     optimizer = Adam(model.parameters(), lr=_lr, weight_decay=1e-4)
-    # [Fix 25] LONG: CosineAnnealingWarmRestarts (T_0=30, T_mult=2) → LR 주기적 재상승
-    # Fix 24 CosineAnnealingLR(T_max=100)에서 0.5411 달성 → WarmRestarts로 plateau 재돌파 시도
+    # ── 스케줄러 설정 ─────────────────────────────────────────────────────────────
+    # LONG   : CosineAnnealingLR(T_max=epochs, eta_min=1e-5)
+    #          epochs 주기로 LR 코사인 감소 → Val AUC 0.5411 달성 (epochs=100, patience=20)
+    #          ReduceLROnPlateau 대비 +0.004, WarmRestarts(T_0=30) 대비 +0.002 우위
+    # SHORT  : ReduceLROnPlateau(patience=3, factor=0.5) → Val AUC 0.5902 달성
+    # CONTEXT: ReduceLROnPlateau(patience=3, factor=0.5) → Val AUC 0.5986 달성
     if expert_type == 'long':
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=30, T_mult=2, eta_min=1e-5)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
     else:
         _sched_patience = 3
         scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=_sched_patience)
@@ -207,7 +211,8 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
                 f"| Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f} | Val AUC: {val_auc:.4f}{trivial_flag}"
             )
 
-            # [Fix 24] CosineAnnealingLR(LONG)은 인자 없이 step(), ReduceLROnPlateau는 val_auc 전달
+            # CosineAnnealingLR(LONG): 인자 없이 step() — epoch마다 LR 갱신
+            # ReduceLROnPlateau(SHORT/CONTEXT): val_auc 기준으로 plateau 감지
             if expert_type == 'long':
                 scheduler.step()
             else:
