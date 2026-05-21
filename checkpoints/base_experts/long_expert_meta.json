@@ -1,1 +1,1 @@
-{"best_val_auc": 0.5376735029916468, "use_attention": true, "hidden_dim": 256, "input_dim": 26}
+{"best_val_auc": 0.5168376950408684, "use_attention": true, "hidden_dim": 256, "input_dim": 26}
