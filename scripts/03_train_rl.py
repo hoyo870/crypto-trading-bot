@@ -153,7 +153,9 @@ class SmartStopCallback(BaseCallback):
             logger.info(f"[SmartStop] 정책 퇴화 감지: entropy_loss={entropy:.6f} → 종료")
             return False
 
-        if self.n_calls % self.eval_freq != 0:
+        # n_steps(=4096) 배수로 증가하는 n_calls가 eval_freq(=10000) 정확히 나누어지지
+        # 않을 수 있으므로, floor division으로 경계 돌파 여부를 체크합니다.
+        if (self.n_calls - 1) // self.eval_freq == self.n_calls // self.eval_freq:
             return True
 
         current_best = self.eval_callback.best_mean_reward

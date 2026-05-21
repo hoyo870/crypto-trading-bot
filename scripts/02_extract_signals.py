@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import numpy as np
 import pandas as pd
@@ -242,6 +243,18 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     df['macd_signal_r'] = np.clip(np.where(np.isnan(_msv), 0.0, _msv / _safe_cr_inf), -0.05, 0.05)
     df['macd_hist_r']   = np.clip(np.where(np.isnan(_mhv), 0.0, _mhv / _safe_cr_inf), -0.03, 0.03)
 
+    # ── [Sync Fix MTF] base_models.py와 동일한 멀티타임프레임 수익률 동기화 ─────
+    # 5m×12=1h, 5m×48=4h, 5m×288=1d — train 기간 quantile 클리핑으로 look-ahead 방지
+    _cr_for_mtf = df['close_raw'].values.astype(np.float64)
+    for _periods, _col in [(12, 'ret_1h'), (48, 'ret_4h'), (288, 'ret_1d')]:
+        _prev = pd.Series(_cr_for_mtf).shift(_periods).values
+        _safe_prev_mtf = np.where((_prev > 0) & (~np.isnan(_prev)), _prev, np.where(_cr_for_mtf > 0, _cr_for_mtf, 1.0))
+        _ret = np.log(_cr_for_mtf / _safe_prev_mtf)
+        _ret_series = pd.Series(_ret)
+        _q_lo_r = _ret_series.iloc[:_q_cutoff].quantile(0.001)
+        _q_hi_r = _ret_series.iloc[:_q_cutoff].quantile(0.999)
+        df[_col] = np.clip(_ret, _q_lo_r, _q_hi_r)
+
     drop_cols = [c for c in df.columns if c.endswith('_raw')]
     df.drop(columns=drop_cols, inplace=True)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -285,13 +298,37 @@ def extract_base_signals(data_path, seq_length=120, batch_size=512,
     logger.info(f"[INFO] 3개의 전문가 모델 로딩 중...")
     model_dir = os.path.join(ROOT_DIR, "checkpoints", "base_experts")
 
-    # [Sync Fix 9/10] PriceActionExpert: input_dim=23, hidden_dim=128, dropout=0.4
+    # 훈련 시 저장된 meta.json에서 아키텍처 로드 (01_train_base.py와 자동 동기화)
+    def _load_meta(expert_name):
+        meta_path = os.path.join(model_dir, f"{expert_name}_expert_meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as _mf:
+                    return json.load(_mf)
+            except Exception:
+                pass
+        return {}
+
+    _long_meta  = _load_meta('long')
+    _short_meta = _load_meta('short')
+
+    # [Sync Fix 9/10] PriceActionExpert: 아키텍처를 meta.json에서 자동 로드
     _pa_input_dim = len(price_vol_cols) + len(context_cols)
-    long_model = PriceActionExpert(input_dim=_pa_input_dim, hidden_dim=128, dropout=0.4, use_attention=False).to(device)
+    long_model = PriceActionExpert(
+        input_dim=_pa_input_dim,
+        hidden_dim=_long_meta.get('hidden_dim', 128),
+        dropout=0.4,
+        use_attention=_long_meta.get('use_attention', False)
+    ).to(device)
     long_model.load_state_dict(torch.load(os.path.join(model_dir, "long_expert.pth"), map_location=device, weights_only=True))
     long_model.eval()
 
-    short_model = PriceActionExpert(input_dim=_pa_input_dim, hidden_dim=128, dropout=0.4, use_attention=True).to(device)
+    short_model = PriceActionExpert(
+        input_dim=_pa_input_dim,
+        hidden_dim=_short_meta.get('hidden_dim', 128),
+        dropout=0.4,
+        use_attention=_short_meta.get('use_attention', True)
+    ).to(device)
     short_model.load_state_dict(torch.load(os.path.join(model_dir, "short_expert.pth"), map_location=device, weights_only=True))
     short_model.eval()
 

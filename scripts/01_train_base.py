@@ -19,27 +19,27 @@ ROOT_DIR = os.path.dirname(BASE_DIR)
 if ROOT_DIR not in os.sys.path:
     os.sys.path.insert(0, ROOT_DIR)
 
-from src.models.base_models import PriceActionExpert, ContextExpert, prepare_expert_data, _MAX_NEG_RATIO
+from src.models.base_models import PriceActionExpert, ContextExpert, prepare_expert_data
 from src.utils.platform_utils import get_device, configure_torch, log_platform_info, get_optimal_workers, get_pin_memory
 
 
 class FocalLoss(nn.Module):
     """
-    Focal Loss: 쉬운 음성 샘플은 down-weight하고 어려운 양성 샘플에 집중.
-    alpha: 양성 클래스 가중치 (pos_weight_raw 기반으로 설정)
-    gamma: 집중 강도 (0=BCE, 2=표준 focal)
-    BCELoss+Sigmoid 모델과 호환됩니다.
+    Focal Loss (logit 입력): 쉬운 샘플 down-weight, 어려운 타점에 집중.
+    alpha=1.0: 클래스 가중치 없음 — gamma만으로 어려운 샘플 집중
+    gamma=3.0: 고집중 모드 — p_t < 0.5 샘플에 강하게 집중
     """
-    def __init__(self, alpha: float = 1.0, gamma: float = 2.0):
+    def __init__(self, alpha: float = 1.0, gamma: float = 3.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def forward(self, logit: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        prob = torch.sigmoid(logit)
         eps = 1e-7
-        pred = torch.clamp(pred, eps, 1.0 - eps)
-        bce = -(target * torch.log(pred) + (1.0 - target) * torch.log(1.0 - pred))
-        pt = torch.where(target == 1.0, pred, 1.0 - pred)
+        prob = torch.clamp(prob, eps, 1.0 - eps)
+        bce = -(target * torch.log(prob) + (1.0 - target) * torch.log(1.0 - prob))
+        pt = torch.where(target == 1.0, prob, 1.0 - prob)
         at = torch.where(target == 1.0,
                          torch.full_like(target, self.alpha),
                          torch.ones_like(target))
@@ -98,46 +98,27 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7,
                 persistent_workers=(get_optimal_workers() > 0)
             )
 
-    # ── 전문가별 모델 / 하이퍼파라미터 (검증된 최적값) ────────────────────────────
-    # LONG   : hd=128, attn=False, dp=0.4, lr=0.001,  smooth=0.05 → best Val AUC 0.5411
-    #          권장 실행: --only long  --epochs 100 --patience 20
-    # SHORT  : hd=128, attn=True,  dp=0.4, lr=0.0007, smooth=0.05 → best Val AUC 0.5922
-    #          권장 실행: --only short --epochs 60  --patience 10
-    # CONTEXT: hd=64,  ContextExpert,       lr=0.001,  smooth=0.0  → best Val AUC 0.6001
-    #          권장 실행: --only context --epochs 100 --patience 20
+    # ── 전문가별 모델 / 하이퍼파라미터 ──────────────────────────────────────────────
+    # LONG   : hd=256, attn=True,  dp=0.4, lr=0.0007 | --only long  --epochs 100 --patience 20
+    # SHORT  : hd=128, attn=True,  dp=0.4, lr=0.0007 | --only short --epochs 60  --patience 10
+    # CONTEXT: hd=64,  ContextExpert,       lr=0.001  | --only context --epochs 100 --patience 20
     if expert_type == 'long':
-        model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=False).to(device)
-        _lr = 0.001
-        _smooth_eps = 0.05
+        model = PriceActionExpert(input_dim=input_dim, hidden_dim=256, dropout=0.4, use_attention=True).to(device)
+        _lr = 0.0007
     elif expert_type == 'short':
         model = PriceActionExpert(input_dim=input_dim, hidden_dim=128, dropout=0.4, use_attention=True).to(device)
         _lr = 0.0007
-        _smooth_eps = 0.05   # label smoothing: 0→0.05, 1→0.95
     else:
-        # CONTEXT: hidden_dim=64, dropout=0.3
         model = ContextExpert(input_dim=input_dim, hidden_dim=64, dropout=0.3).to(device)
         _lr = 0.001
-        _smooth_eps = 0.0    # label smoothing 미적용
 
-    # 손실 함수: long/short는 FocalLoss(alpha=0.75, gamma=2.0), context는 BCEWithLogitsLoss
-    # Focal Loss는 희소한 양성 클래스(long 신호 등)를 더 강하게 학습해 출력 범위를 확장합니다.
-    # [Fix 7] long/short/context 모두 BCEWithLogitsLoss 으로 통일
-    # pos_weight = min(raw_ratio, _MAX_NEG_RATIO) → 데이터 캐핑 1:_MAX_NEG_RATIO 와 일치시켜 이중 보정 방지
-    pos_w_val = min(float(pos_weight), float(_MAX_NEG_RATIO))
-    pos_w = torch.tensor([pos_w_val], device=device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
-
-    # [Fix 8] 최종 FC 바이어스를 클래스 prior logit 으로 초기화
-    # pos_weight = neg/pos → prior_logit = log(pos_rate/(1-pos_rate)) = -log(pos_weight)
-    # 초기화 시 logit≈0 에서 기울기가 pos_weight*(0.5-1)*n_pos + 0.5*n_neg = 0 으로
-    # 정확히 상쇄되어 학습이 정지하는 문제를 방지합니다.
-    _prior_logit = -float(torch.log(pos_w).item())  # sigmoid(prior_logit) = pos_rate
-    model.fc[-1].bias.data.fill_(_prior_logit)
+    # Focal Loss(gamma=3.0): 쉬운 샘플 down-weight — 확신 없는 어려운 타점에 집중
+    # alpha=1.0: 클래스 가중치 없음, gamma만으로 집중 제어
+    criterion = FocalLoss(alpha=1.0, gamma=3.0)
     logger.info(
-        f"  손실함수: BCEWithLogitsLoss(pos_weight={pos_w.item():.2f}) | raw pos_weight={pos_weight:.2f} "
-        f"| prior_logit={_prior_logit:.3f} | lr={_lr} | smooth_eps={_smooth_eps}"
+        f"  손실함수: FocalLoss(alpha=1.0, gamma=3.0) | pos_weight(ref)={pos_weight:.2f} | lr={_lr}"
     )
-    optimizer = Adam(model.parameters(), lr=_lr, weight_decay=1e-4)
+    optimizer = Adam(model.parameters(), lr=_lr)
     # ── 스케줄러 설정 ─────────────────────────────────────────────────────────────
     # LONG   : CosineAnnealingLR(T_max=epochs, eta_min=1e-5)
     #          epochs 주기로 LR 코사인 감소 → Val AUC 0.5411 달성 (epochs=100, patience=20)
@@ -164,9 +145,7 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7,
                 optimizer.zero_grad()
 
                 predictions = model(X_batch)
-                # [Fix 10] Label smoothing: 0→ε, 1→(1-ε)  (val은 hard label 유지)
-                _y_loss = y_batch * (1.0 - 2 * _smooth_eps) + _smooth_eps if _smooth_eps > 0 else y_batch
-                loss = criterion(predictions, _y_loss)
+                loss = criterion(predictions, y_batch)
                 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -254,11 +233,27 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7,
             pass
 
     elapsed = time.time() - start_time
+    # 훈련 시 사용한 아키텍처 파라미터 기록 (02_extract_signals.py 자동 동기화용)
+    if expert_type == 'long':
+        _arch_use_attention = True
+        _arch_hidden_dim = 256
+    elif expert_type == 'short':
+        _arch_use_attention = True
+        _arch_hidden_dim = 128
+    else:
+        _arch_use_attention = False
+        _arch_hidden_dim = 64
+
     if best_model_weights is not None:
         if best_val_auc > prev_best_auc:
             torch.save(best_model_weights, save_path)
             with open(meta_path, 'w') as _f:
-                json.dump({'best_val_auc': best_val_auc}, _f)
+                json.dump({
+                    'best_val_auc': best_val_auc,
+                    'use_attention': _arch_use_attention,
+                    'hidden_dim': _arch_hidden_dim,
+                    'input_dim': input_dim,
+                }, _f)
             logger.info(f"✅ [{expert_type.upper()}] 훈련 완료 및 저장 (Best AUC: {best_val_auc:.4f}, 소요시간: {int(elapsed//60)}분 {int(elapsed%60)}초) -> {save_path}")
         else:
             logger.info(f"⚠️  [{expert_type.upper()}] 훈련 완료 (Best AUC: {best_val_auc:.4f} ≤ 이전 best {prev_best_auc:.4f}) — pth 유지, 소요시간: {int(elapsed//60)}분 {int(elapsed%60)}초")

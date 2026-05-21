@@ -182,8 +182,8 @@ def prepare_expert_data(filepath, expert_type, seq_length=120, long_split=False)
     horizon = 72
     TP_MULT = 2.0   # ATR 배수: TP = 2.0 × ATR%
     SL_MULT = 1.0   # ATR 배수: SL = 1.0 × ATR%
-    MIN_TP  = 0.5   # 최소 TP (%) — 변동성 극저점 방어
-    MIN_SL  = 0.25  # 최소 SL (%) — 변동성 극저점 방어
+    MIN_TP  = 0.50  # 최소 TP (%) — 고정 TP=0.5%
+    MIN_SL  = 0.25  # 최소 SL (%) — 고정 SL=0.25%
 
     # 14주기 ATR 계산 및 가격 대비 비율(%)로 변환
     # h, l, c 는 위 캔들 패턴 블록에서 이미 df['*_raw'].values 로 정의됨
@@ -254,6 +254,18 @@ def prepare_expert_data(filepath, expert_type, seq_length=120, long_split=False)
     df['macd_r']        = np.clip(np.where(np.isnan(_macd_v),   0.0, _macd_v   / _safe_cr), -0.05, 0.05)
     df['macd_signal_r'] = np.clip(np.where(np.isnan(_macd_s_v), 0.0, _macd_s_v / _safe_cr), -0.05, 0.05)
     df['macd_hist_r']   = np.clip(np.where(np.isnan(_macd_h_v), 0.0, _macd_h_v / _safe_cr), -0.03, 0.03)
+
+    # ── 멀티타임프레임 수익률 (1h / 4h / 1d) ──────────────────────────────────
+    # 5m × 12 = 1h, 5m × 48 = 4h, 5m × 288 = 1d
+    # look-ahead 없음: 현재 봉 기준 과거 종가 대비 로그수익률
+    # train 기간 quantile 클리핑으로 극단값 방지
+    for _periods, _col in [(12, 'ret_1h'), (48, 'ret_4h'), (288, 'ret_1d')]:
+        _prev = df['close_raw'].shift(_periods).values
+        _safe_prev = np.where((_prev > 0) & (~np.isnan(_prev)), _prev, _safe_cr)
+        df[_col] = np.log(_cr / _safe_prev)
+        _q_lo_r = df[_col].iloc[:train_cutoff].quantile(0.001)
+        _q_hi_r = df[_col].iloc[:train_cutoff].quantile(0.999)
+        df[_col] = df[_col].clip(_q_lo_r, _q_hi_r)
 
     # 불필요 원본 제거
     drop_cols = [c for c in df.columns if c.endswith('_raw')]
