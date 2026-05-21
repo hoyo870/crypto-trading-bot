@@ -93,26 +93,32 @@ PPO_TUNING_PROFILES = {
     "stable": {
         "policy_kwargs": dict(net_arch=[256, 256, 128]),
         "learning_rate": 1e-4,
-        "ent_coef": 0.01,
+        "ent_coef": 0.02,       # 0.01 → 0.02: 탐색 강화 (local optimum 탈출)
         "vf_coef": 0.5,
         "n_steps": 4096,
-        "batch_size": 128,
+        "batch_size": 512,      # 128 → 512: 그라디언트 추정 노이즈 감소
+        "n_epochs": 10,
+        "gae_lambda": 0.95,
     },
     "balanced": {
         "policy_kwargs": dict(net_arch=[256, 256, 128]),
         "learning_rate": 2e-4,
-        "ent_coef": 0.01,
+        "ent_coef": 0.025,      # 0.01 → 0.025: 탐색 강화
         "vf_coef": 0.5,
-        "n_steps": 2048,
-        "batch_size": 64,
+        "n_steps": 4096,        # 2048 → 4096: 어드밴티지 추정 품질 향상
+        "batch_size": 256,      # 64 → 256: 더 안정적인 그라디언트
+        "n_epochs": 10,
+        "gae_lambda": 0.95,
     },
     "aggressive": {
         "policy_kwargs": dict(net_arch=[256, 256, 128]),
         "learning_rate": 3e-4,
-        "ent_coef": 0.02,
+        "ent_coef": 0.03,       # 0.02 → 0.03: 적극적 탐색
         "vf_coef": 0.5,
         "n_steps": 2048,
-        "batch_size": 64,
+        "batch_size": 256,      # 64 → 256: 그라디언트 품질 개선
+        "n_epochs": 10,
+        "gae_lambda": 0.95,
     },
 }
 
@@ -221,7 +227,7 @@ class CustomEvalCallback(EvalCallback):
     """
 
     def __init__(self, eval_env, best_model_save_path, log_path=None,
-                 eval_freq=10_000, n_eval_episodes=5,
+                 eval_freq=10_000, n_eval_episodes=10,
                  deterministic=True, render=False, verbose=1):
         super().__init__(
             eval_env=eval_env,
@@ -416,9 +422,10 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
 
     if n_envs > 1:
         # DummyVecEnv: 동일 프로세스 내 N개 환경을 배치 처리
-        # 롤아웃 inference가 batch=N으로 묶여 Python 오버헤드 대폭 감소
-        hp["n_steps"] = max(64, hp["n_steps"] // n_envs)
-        logger.info(f"    DummyVecEnv: n_envs={n_envs}, n_steps(per env)={hp['n_steps']}")
+        # n_steps는 SB3에서 "환경당(per-env)" 값: 나누지 않고 유지해야 어드밴티지 추정 품질 보존
+        # 총 롤아웃 버퍼 = n_steps × n_envs (자동 확장) → 더 다양한 전환 수집
+        logger.info(f"    DummyVecEnv: n_envs={n_envs}, n_steps(per env)={hp['n_steps']}, "
+                    f"total_rollout={hp['n_steps'] * n_envs:,}")
         if len(dfs) > 1:
             # 멀티심볼: 심볼별로 n_envs를 균등 배분 (각 환경이 단일 심볼만 사용)
             n_per_sym = max(1, n_envs // len(dfs))
@@ -613,7 +620,7 @@ if __name__ == "__main__":
                         help="훈련할 모델 수 (각각 랜덤 seed)")
     parser.add_argument("--leverage", type=int, default=2,
                         help="레버리지 배수 (기본 2)")
-    parser.add_argument("--timesteps", type=int, default=3_000_000,
+    parser.add_argument("--timesteps", type=int, default=5_000_000,
                         help="총 훈련 타임스텝")
     parser.add_argument("--eval-freq", type=int, default=10_000,
                         help="평가 주기 (steps)")
@@ -627,7 +634,7 @@ if __name__ == "__main__":
                         help="SmartStop 인내심 (평가 주기 단위)")
     parser.add_argument("--reward-target", type=float, default=1e8)
     parser.add_argument("--entropy-threshold", type=float, default=-0.01)
-    parser.add_argument("--no-improve-start-ratio", type=float, default=0.1)
+    parser.add_argument("--no-improve-start-ratio", type=float, default=0.25)
     parser.add_argument("--mutation-scale", type=float, default=1.0,
                         help="변이 폭 스케일 (1.0=최대, 0.0=변이 없음; run_evolution.py가 세대별 자동 조정)")
     parser.add_argument("--n-envs", type=int, default=4,

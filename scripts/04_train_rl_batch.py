@@ -146,7 +146,7 @@ if __name__ == "__main__":
     parser.add_argument("--profiles", type=str, default="stable,balanced,aggressive", help="쉼표로 구분된 튜닝 프로파일")
     parser.add_argument("--count-per-task", type=int, default=10, help="각 그룹(조합)당 훈련할 모델 수 (기본: 10)")
     parser.add_argument("--jobs", type=int, default=get_optimal_jobs(), help="동시 실행할 병렬 프로세스 수 (기본: CPU코어//2 자동 감지)")
-    parser.add_argument("--patience", type=int, default=30, help="03_train_rl.py로 전달할 조기종료 인내심 값")
+    parser.add_argument("--patience", type=int, default=50, help="03_train_rl.py로 전달할 조기종료 인내심 값")
     
     parser.add_argument("--data-path", type=str, default=os.path.join("data", "signals", "base_signals_log.csv"))
     parser.add_argument("--model-dir", type=str, default=os.path.join("checkpoints", "rl_generations"))

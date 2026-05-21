@@ -388,9 +388,10 @@ class BabyLeverageTradingEnv(gym.Env):
                 reward += -0.0001
             else:
                 # ★ Baby 원칙 5-b: 미실현 방향 신호 (지수감점/트레일링 삭제)
+                # 0.1 → 0.3: 방향성 학습 신호 강화 (수익/손실 모두 3배 명확해짐)
                 raw_ret = self._calc_raw_ret(current_price)
                 lev_ret = raw_ret * self.leverage
-                reward += lev_ret * 0.1
+                reward += lev_ret * 0.3
 
         # ★ Baby 원칙 2: _apply_funding() 호출 삭제
         # ★ Baby 원칙 2: 드로우다운 방어 패널티 삭제
