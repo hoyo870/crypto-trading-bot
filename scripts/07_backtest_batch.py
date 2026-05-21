@@ -35,6 +35,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from src.utils.platform_utils import get_optimal_jobs
+from src.utils.model_utils import resolve_model_path as _resolve_model_path
 
 # ── 로깅 ───────────────────────────────────────────────────────────────────
 os.makedirs(os.path.join(ROOT_DIR, "logs"), exist_ok=True)
@@ -57,20 +58,7 @@ if _custom_log_dir:
 
 BACKTEST_SCRIPT = os.path.join(SCRIPT_DIR, "05_backtest.py")
 RANK_SCRIPT     = os.path.join(SCRIPT_DIR, "06_rank.py")
-
-
-# ── 모델 경로 탐색 ─────────────────────────────────────────────────────────
-def _resolve_model_path(tag: str, model_dir: str):
-    clean  = tag[:-4] if tag.endswith(".zip") else tag
-    folder = os.path.join(model_dir, clean)
-    if os.path.isdir(folder):
-        for f in os.listdir(folder):
-            if f.endswith(".zip") and ("final" in f or "best" in f):
-                return os.path.join(folder, f)
-    direct = os.path.join(model_dir, f"{clean}.zip")
-    if os.path.exists(direct):
-        return direct
-    return None
+# _resolve_model_path: src/utils/model_utils.resolve_model_path 로 통합 (위 import 참조)
 
 
 # ── 단일 백테스트 subprocess 실행 ─────────────────────────────────────────

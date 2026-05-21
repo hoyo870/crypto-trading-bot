@@ -38,6 +38,8 @@ ROOT_DIR   = os.path.dirname(SCRIPT_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from src.utils.model_utils import resolve_model_path
+
 # ── 환경 임포트는 run_backtest() 내부에서 env_type 에 따라 동적으로 수행 ──
 
 # ── 로깅 ───────────────────────────────────────────────────────────────────
@@ -82,14 +84,28 @@ def _calc_mdd(balances):
 
 
 def _calc_sharpe(balances, steps_per_year=105120):
+    """
+    활성 거래 구간(balance 변화가 있는 스텝)만 사용하는 Sharpe Ratio.
+
+    무포지션 구간에서 balance 가 불변이면 0-return 이 누적되어
+    std 가 인위적으로 낮아지고 Sharpe 가 실제보다 높게 왜곡된다.
+    활성 스텝 비율(active_fraction)로 연환산 계수를 보정한다.
+      효과적 annualize = sqrt(steps_per_year × active_fraction)
+    """
     arr = np.array(balances, dtype=float)
     if len(arr) < 2:
         return 0.0
     rets = np.diff(arr) / arr[:-1]
-    sigma = rets.std(ddof=1)
+    # 무포지션 구간(0-return) 제거
+    active_rets = rets[rets != 0.0]
+    if len(active_rets) < 2:
+        return 0.0
+    sigma = active_rets.std(ddof=1)
     if sigma == 0:
         return 0.0
-    return float(rets.mean() / sigma * np.sqrt(steps_per_year))
+    # 활성 스텝 비율로 실효 주기 보정 (시장에 있는 시간 비율 반영)
+    active_fraction = len(active_rets) / len(rets)
+    return float(active_rets.mean() / sigma * np.sqrt(steps_per_year * active_fraction))
 
 
 def _load_datetimes(data_path: str):
@@ -97,18 +113,9 @@ def _load_datetimes(data_path: str):
     return pd.to_datetime(df["datetime"], errors="coerce").reset_index(drop=True)
 
 
-def _resolve_model_path(tag: str, model_dir: str):
-    """태그 → 모델 .zip 경로 자동 탐색."""
-    clean = tag[:-4] if tag.endswith(".zip") else tag
-    folder = os.path.join(model_dir, clean)
-    if os.path.isdir(folder):
-        for f in os.listdir(folder):
-            if f.endswith(".zip") and ("final" in f or "best" in f):
-                return os.path.join(folder, f)
-    direct = os.path.join(model_dir, f"{clean}.zip")
-    if os.path.exists(direct):
-        return direct
-    return None
+# _resolve_model_path → src/utils/model_utils.resolve_model_path 로 통합
+# 하위 호환을 위해 별칭 유지
+_resolve_model_path = resolve_model_path
 
 
 # ── 핵심 백테스트 함수 ─────────────────────────────────────────────────────

@@ -57,7 +57,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("TrainBase")
 
-def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, extra_data_paths=None):
+def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7,
+                 extra_data_paths=None, long_split=False):
     start_time = time.time()
     _dev_str = get_device()
     configure_torch(_dev_str)
@@ -69,7 +70,9 @@ def train_expert(expert_type, data_path, seq_length=120, epochs=50, patience=7, 
     logger.info(f"{'='*50}")
 
     # 데이터 로드 (기본 심볼 - BTC, val/test 분할 기준)
-    train_loader, val_loader, test_loader, input_dim, pos_weight = prepare_expert_data(data_path, expert_type, seq_length)
+    train_loader, val_loader, test_loader, input_dim, pos_weight = prepare_expert_data(
+        data_path, expert_type, seq_length, long_split=(long_split and expert_type == 'long')
+    )
 
     # [Fix 13] Multi-symbol: 추가 심볼의 train 데이터를 기본 심볼(BTC) train 데이터에 합산
     # val/test는 BTC 기준 유지 → AUC 비교 일관성 보장
@@ -294,6 +297,18 @@ if __name__ == "__main__":
         default=None,
         help="지정한 전문가한 가지만 훈련 (Fix 19: LONG 단독 훈련 등)",
     )
+    parser.add_argument(
+        "--long-split",
+        action="store_true",
+        default=False,
+        help=(
+            "Long 전문가 전용 데이터 분할 전략 적용.\n"
+            "  기본: train=Bull전체, val=Bear초반 → 도메인 시프트(AUC~0.5)\n"
+            "  --long-split: train=Bull초중반(~2024-06), val=Bull후반(~2025-06)\n"
+            "  → Train/Val 모두 Bull 레짐으로 일치, Long 신호 품질 향상 기대.\n"
+            "  Short/Context 에는 무시됩니다."
+        ),
+    )
     args = parser.parse_args()
 
     data_path = args.data_path or os.path.join(
@@ -336,6 +351,7 @@ if __name__ == "__main__":
             _ep_epochs   = args.epochs   if args.epochs   is not None else _default_epochs[_expert]
             _ep_patience = args.patience if args.patience is not None else _default_patience[_expert]
             train_expert(_expert, data_path, seq_length=args.seq_length, epochs=_ep_epochs,
-                         patience=_ep_patience, extra_data_paths=_ep or None)
+                         patience=_ep_patience, extra_data_paths=_ep or None,
+                         long_split=args.long_split)
 
         logger.info("\n🎉 모든 Base 전문가 모델 훈련이 완료되었습니다!")

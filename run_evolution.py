@@ -25,7 +25,8 @@ import logging
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
 TRAIN_BATCH_SCRIPT = os.path.join(SCRIPTS_DIR, "04_train_rl_batch.py")
-BACKTEST_SCRIPT = os.path.join(SCRIPTS_DIR, "07_backtest_batch.py")
+BACKTEST_SCRIPT    = os.path.join(SCRIPTS_DIR, "07_backtest_batch.py")
+FINETUNE_SCRIPT    = os.path.join(SCRIPTS_DIR, "03b_finetune_full.py")
 
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -190,6 +191,79 @@ def get_current_generation(checkpoints_dir):
     # gen1, gen2 중 가장 높은 숫자 반환
     return max([int(g.replace("gen", "")) for g in gens])
 
+# ── 1b. Phase 1.5 — Baby→Full 커리큘럼 파인튜닝 ───────────────────────────
+def _run_finetune_phase(gen_model_dir, gen_logs_dir, gen_str, args, env_vars):
+    """
+    tags.txt 의 Baby 모델 전체를 03b_finetune_full.py 로 Full 환경에 파인튜닝.
+    파인튜닝된 모델은 gen_model_dir 안에 저장되고 tags.txt 에 태그가 추가되어
+    Phase 2 백테스트 풀에 자동 포함된다.
+    """
+    from src.utils.model_utils import resolve_model_path
+
+    tags_path = os.path.join(gen_model_dir, "tags.txt")
+    if not os.path.exists(tags_path):
+        logger.warning(f"⚠️ [{gen_str}] tags.txt 없음 → Phase 1.5 파인튜닝 건너뜀")
+        return
+
+    with open(tags_path, "r", encoding="utf-8") as f:
+        baby_tags = [line.strip() for line in f if line.strip()]
+
+    if not baby_tags:
+        logger.warning(f"⚠️ [{gen_str}] tags.txt 가 비어 있음 → Phase 1.5 파인튜닝 건너뜀")
+        return
+
+    # 데이터 경로 결정 (인자 우선, 없으면 환경변수)
+    data_path = args.data_path or env_vars.get("CUSTOM_DATA_PATH")
+    if not data_path:
+        logger.warning(f"⚠️ [{gen_str}] --data-path 미지정 → Phase 1.5 파인튜닝 건너뜀")
+        return
+
+    finetune_log_dir = os.path.join(gen_logs_dir, "finetune")
+    os.makedirs(finetune_log_dir, exist_ok=True)
+
+    logger.info("")
+    logger.info(f"🔧 [{gen_str}] Phase 1.5: {len(baby_tags)}개 Baby 모델 → Full 환경 파인튜닝 시작")
+
+    new_tags = []
+    for tag in baby_tags:
+        baby_path = resolve_model_path(tag, gen_model_dir)
+        if not baby_path:
+            logger.warning(f"  [{gen_str}] 모델 파일 없음: {tag} → 건너뜀")
+            continue
+
+        # 태그에서 레버리지·프로파일 추출 (예: lev2_balanced_seed12345_001)
+        m = re.search(r'lev(\d+)_(stable|balanced|aggressive)', tag)
+        lev  = int(m.group(1)) if m else 1
+        prof = m.group(2) if m else "balanced"
+
+        cmd = [
+            sys.executable, FINETUNE_SCRIPT,
+            "--baby-model-path", baby_path,
+            "--leverage",        str(lev),
+            "--tuning-profile",  prof,
+            "--data-path",       data_path,
+            "--model-dir",       gen_model_dir,
+            "--log-dir",         finetune_log_dir,
+            "--timesteps",       str(args.finetune_timesteps),
+        ]
+        logger.info(f"  ▶️ 파인튜닝 시작: {tag} (lev={lev}, prof={prof})")
+        result = subprocess.run(cmd, env=env_vars, cwd=ROOT_DIR)
+        if result.returncode == 0:
+            ft_tag = f"finetune_lev{lev}_{prof}_{Path(baby_path).stem}"
+            new_tags.append(ft_tag)
+            logger.info(f"  ✅ 파인튜닝 완료: {ft_tag}")
+        else:
+            logger.warning(f"  ⚠️ 파인튜닝 실패 (exit {result.returncode}): {tag} → 건너뜀")
+
+    # 새 태그를 tags.txt 에 추가
+    if new_tags:
+        with open(tags_path, "a", encoding="utf-8") as f:
+            for t in new_tags:
+                f.write(t + "\n")
+        logger.info(f"  🏷️  {len(new_tags)}개 파인튜닝 모델이 tags.txt 에 추가 → Phase 2 평가 풀에 합류")
+    logger.info(f"🔧 [{gen_str}] Phase 1.5 완료\n")
+
+
 # ── 2. 자동 폐기(Garbage Collector) ─────────────────────────────────────────
 def auto_discard_models(reports_dir, model_dir, log_dir, keep_top_k):
     """백테스트 결과를 읽어 Top K에 들지 못한 모델과 로그, 차트를 물리적으로 완벽히 삭제합니다."""
@@ -235,6 +309,19 @@ def auto_discard_models(reports_dir, model_dir, log_dir, keep_top_k):
             deleted_count += 1
             
     logger.info(f"✅ 총 {deleted_count}개의 열등한 모델(가중치/차트/로그)이 완벽히 소각되었습니다.\n")
+
+    # ── tags.txt 동기화: 폐기된 태그 제거 ────────────────────────────────
+    tags_path = os.path.join(model_dir, "tags.txt")
+    if os.path.exists(tags_path):
+        with open(tags_path, "r", encoding="utf-8") as f:
+            old_tags = [line.strip() for line in f if line.strip()]
+        new_tags = [t for t in old_tags if t in survivors]
+        removed_cnt = len(old_tags) - len(new_tags)
+        if removed_cnt > 0:
+            with open(tags_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(new_tags) + "\n")
+            logger.info(f"🏷️ tags.txt 동기화 완료: {removed_cnt}개 폐기 태그 제거 → {len(new_tags)}개 생존")
+
     return best_model_tag, survivors
 
 
@@ -275,8 +362,10 @@ def run_evolution_pipeline(args):
         logger.info(f"🌱 [시작] {gen_str} 세대 배양을 시작합니다...")
 
         # 적응형 변이 폭: 세대 진행마다 0.1씩 감소, 최소 0.3 보장
+        # ⚠️ 03_train_rl.py 의 FINETUNE_SCALE_FACTOR(=0.5) 가 추가로 곱해지므로
+        #    파인튜닝 모드의 실제 유효 변이 스케일 = mutation_scale × 0.5 (유효 범위 [0.15, 0.5])
         mutation_scale = max(0.3, args.mutation_scale_start - (gen - start_gen) * 0.1)
-        logger.info(f"🔬 [{gen_str}] 변이 폭 스케일: {mutation_scale:.2f}")
+        logger.info(f"🔬 [{gen_str}] 변이 폭 스케일: {mutation_scale:.2f} (파인튜닝 시 실효 스케일: {mutation_scale*0.5:.2f})")
 
         # --- [Phase 1: 병렬 훈련 가동] ---
         train_cmd = [
@@ -312,7 +401,18 @@ def run_evolution_pipeline(args):
 
         # 초기/이전 세대 부모를 현재 세대 백테스트 비교군에 포함
         parent_candidate_tag = _inject_parent_candidate(incoming_parent_path, gen_str, gen_model_dir)
-        
+
+        # --- [Phase 1.5: Baby→Full 커리큘럼 파인튜닝 (선택)] ---
+        # tags.txt 의 모든 Baby 모델을 Full 환경으로 파인튜닝 후 평가 풀에 추가
+        if not args.skip_finetune:
+            _run_finetune_phase(
+                gen_model_dir=gen_model_dir,
+                gen_logs_dir=gen_logs_dir,
+                gen_str=gen_str,
+                args=args,
+                env_vars=env_vars,
+            )
+
         # --- [Phase 2: 백테스트 및 평가] ---
         logger.info("")
         logger.info(f"📊 [{gen_str}] 훈련 완료. 전체 백테스트 및 성적표 산출 중...")
@@ -529,6 +629,11 @@ if __name__ == "__main__":
                         help="자동 폐기 후 생존 모델 최종 평가에 사용할 환경\n"
                              "full: 본절컷·승률보너스 포함 완전체 환경 (기본)\n"
                              "baby: 초기 배치 평가와 동일한 경량 환경")
+    parser.add_argument("--skip-finetune", action="store_true", default=False,
+                        help="Phase 1.5(Baby→Full 커리큘럼 파인튜닝)를 건너뜁니다.\n"
+                             "기존 Baby-only 진화 파이프라인 동작을 유지하려면 이 플래그를 사용하세요.")
+    parser.add_argument("--finetune-timesteps", type=int, default=500_000,
+                        help="Phase 1.5 파인튜닝 총 학습 스텝 수 (기본: 500,000)")
 
     args = parser.parse_args()
     

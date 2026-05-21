@@ -89,6 +89,11 @@ def _check_signal_freshness(data_path: str) -> None:
 
 
 # ── 하이퍼파라미터 프로파일 ────────────────────────────────────────────────
+# 파인튜닝 모드에서 Catastrophic Forgetting 방지를 위해 변이 폭을 추가로 축소하는 계수.
+# run_evolution.py 가 MUTATION_SCALE 을 [0.3, 1.0] 범위로 전달하면,
+# 실제 적용 스케일 = MUTATION_SCALE × FINETUNE_SCALE_FACTOR → 유효 범위 [0.15, 0.5]
+FINETUNE_SCALE_FACTOR = 0.5
+
 PPO_TUNING_PROFILES = {
     "stable": {
         "policy_kwargs": dict(net_arch=[256, 256, 128]),
@@ -467,10 +472,11 @@ def train_one(seed, model_tag, leverage, tuning_profile, load_model_path,
         rng = np.random.default_rng(seed)
         s = float(np.clip(mutation_scale, 0.0, 1.0))  # 적응형 변이 폭 스케일 (0.0~1.0)
 
-        # 파인튜닝: 변이 폭 50% 완화 (Catastrophic Forgetting 방지, 기존 학습 보존)
+        # 파인튜닝: Catastrophic Forgetting 방지를 위해 변이 폭 추가 완화
+        # (run_evolution.py → MUTATION_SCALE → 여기서 FINETUNE_SCALE_FACTOR 곱 → 유효 스케일)
         s_original = s
-        s = s * 0.5
-        logger.info(f"    [파인튜닝 모드] 변이 폭 완화: {s_original:.2f} → {s:.2f}")
+        s = s * FINETUNE_SCALE_FACTOR
+        logger.info(f"    [파인튜닝 모드] 변이 폭 완화: {s_original:.2f} × {FINETUNE_SCALE_FACTOR} → {s:.2f}")
 
         # 1. 엔트로피(ENT): [1-0.2s, 1+0.5s] 범위 변이, 클램프 [0.003, 0.03]
         mutated_ent = float(np.clip(

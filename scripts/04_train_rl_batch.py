@@ -101,11 +101,11 @@ def run_parallel_orchestrator(args):
             env_vars["OMP_NUM_THREADS"]  = "1"
             env_vars["MKL_NUM_THREADS"]  = "1"
             
-            proc = subprocess.Popen(cmd, 
-                env=env_vars, 
+            proc = subprocess.Popen(cmd,
+                env=env_vars,
                 cwd=ROOT_DIR,
                 # stdout=subprocess.DEVNULL, # 👈 로그 출력 숨김
-                stderr=subprocess.DEVNULL  # 👈 에러 출력 숨김
+                stderr=subprocess.PIPE,    # 에러를 캡처해 실패 시 로깅 (DEVNULL → 디버깅 불가 문제 해결)
             )
             active_procs.append((proc, lev, prof))
         
@@ -119,7 +119,14 @@ def run_parallel_orchestrator(args):
                 
                 # 에러 발생 시 즉시 중단 안전장치
                 if ret != 0:
+                    # 프로세스 종료 후 stderr 읽기 (비차단: 이미 EOF)
+                    try:
+                        err_text = proc.stderr.read(8192).decode("utf-8", errors="replace").strip()
+                    except Exception:
+                        err_text = "(stderr 읽기 실패)"
                     logger.error(f"\n[ERROR] ❌ {lev}x ({prof}) 훈련 그룹에서 치명적 에러 발생! (Exit code: {ret})")
+                    if err_text:
+                        logger.error(f"[STDERR 마지막 내용]\n{err_text[-3000:]}")
                     for p, _, _ in active_procs:
                         p.terminate()
                     sys.exit(ret)

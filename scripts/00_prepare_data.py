@@ -36,10 +36,7 @@ ROOT_DIR = os.path.dirname(BASE_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-# ── 시장 국면 경계 ─────────────────────────────────────────────────────────
-PHASE_ACCUM_END = pd.Timestamp('2023-10-15 23:59:00')  # Phase 0 끝
-PHASE_BULL_END  = pd.Timestamp('2025-06-30 23:59:00')  # Phase 1 끝 / train 정규화 기준
-PHASE_VAL_END   = pd.Timestamp('2025-10-31 23:59:00')  # val 끝
+from src.utils.constants import PHASE_ACCUM_END, PHASE_BULL_END, PHASE_VAL_END
 
 SYMBOLS = ['BTC_USDT', 'ETH_USDT', 'SOL_USDT', 'XRP_USDT']
 

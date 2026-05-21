@@ -9,19 +9,16 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from src.utils.platform_utils import get_optimal_workers, get_pin_memory
+from src.utils.constants import PHASE_BULL_END, PHASE_VAL_END, LONG_TRAIN_END, LONG_VAL_END
 
-# ── 시장 국면 경계 (prepare_expert_data / extract_signals 공통 사용) ─────────
-# Phase 0: Accumulation  2023-05-01 ~ 2023-10-15
-# Phase 1: Bull Run      2023-10-16 ~ 2025-06-30  ← train 기준선
-# Phase 2: Bear / Crash  2025-07-01 ~
-_PHASE_BULL_END = pd.Timestamp('2025-06-30 23:59:00')
-_PHASE_VAL_END  = pd.Timestamp('2025-10-31 23:59:00')
+# 하위 호환 별칭 (기존 코드가 _ prefix 를 사용하므로 유지)
+_PHASE_BULL_END = PHASE_BULL_END
+_PHASE_VAL_END  = PHASE_VAL_END
 
 # ── LONG 전용 분할 경계 (현재 미적용 — 현재 best AUC 0.5411은 공통 분할로 달성) ────
 # 향후 LONG 도메인 시프트(Train=Bull / Val=Bear) 개선 시도용 예비 상수.
 # 적용 시 prepare_expert_data에서 expert_type=='long' 분기 추가 필요.
-# _LONG_TRAIN_END = pd.Timestamp('2024-06-30 23:59:00')  # Bull 초중반 학습 끝
-# _LONG_VAL_END   = pd.Timestamp('2025-06-30 23:59:00')  # Bull 후반+Bear 혼합 검증 끝
+# from src.utils.constants import LONG_TRAIN_END  # TODO #8 활성화 예정
 
 # ── 훈련 데이터 언더샘플링 상한 (Pos 1 : Neg 최대 N) ─────────────────────────
 # BCEWithLogitsLoss pos_weight 계산과 일치시켜 이중 보정을 방지합니다.
@@ -122,7 +119,7 @@ class ContextExpert(nn.Module):
 # ─────────────────────────────────────────────────────────────
 # 3. 데이터 파이프라인 (시계열 파괴 버그 및 Leakage 해결)
 # ─────────────────────────────────────────────────────────────
-def prepare_expert_data(filepath, expert_type, seq_length=120):
+def prepare_expert_data(filepath, expert_type, seq_length=120, long_split=False):
     """
     expert_type별 학습 데이터를 구성합니다.
     - long   : 롱 TP 우선 도달 시 1
@@ -131,6 +128,14 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
 
     시계열 분할은 인덱스 기반으로 수행하며, split 경계에는 seq_length 간격을 둬
     윈도우 겹침에 의한 누출 가능성을 줄입니다.
+
+    Args:
+        long_split (bool): Long 전문가 전용 분할 전략 적용 여부.
+            True  → train = Phase 0+1 초중반 (~LONG_TRAIN_END),
+                    val   = Phase 1 후반 (LONG_TRAIN_END+1step ~ LONG_VAL_END)
+                    → Train/Val 모두 Bull 레짐, 도메인 시프트 완화
+            False → 기본 분할 (train = Phase 0+1, val = Phase 2 초반)
+            expert_type != 'long' 일 때는 무시됩니다.
     """
     print(f"[INFO] {expert_type.upper()} 전문가용 데이터 로드 및 전처리 중...")
     df = pd.read_csv(filepath)
@@ -281,9 +286,14 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     targets = df['Target'].values.astype(np.float32)
 
     # ── 시장 국면 기반 인덱스 분할 ──────────────────────────────────────────
-    # Phase 0+1 (~ 2025-06-30) → train
-    # Phase 2 early (2025-07-01 ~ 2025-10-31) → val
-    # Phase 2 late  (2025-11-01 ~)             → test
+    # 기본 분할:
+    #   Phase 0+1 (~ 2025-06-30) → train
+    #   Phase 2 early (2025-07-01 ~ 2025-10-31) → val
+    #   Phase 2 late  (2025-11-01 ~)             → test
+    # Long 전용 분할 (long_split=True):
+    #   Phase 0+1 초중반 (~ LONG_TRAIN_END=2024-06-30) → train
+    #   Phase 1 후반 (2024-07-01 ~ LONG_VAL_END=2025-06-30) → val
+    #   Phase 2 ~ → test (기본과 동일)
     # 경계에서 seq_length 간격을 둬 윈도우 겹침에 의한 누출을 방지합니다.
     _dt = pd.to_datetime(df['datetime'])
     _bull_end_pos = int((_dt <= _PHASE_BULL_END).sum())
@@ -292,17 +302,34 @@ def prepare_expert_data(filepath, expert_type, seq_length=120):
     # [Fix 1] off-by-one 수정: end_idx = seq_length - 1 일 때 start_idx = 0
     total_valid_indices = np.arange(seq_length - 1, len(features))
 
-    # horizon 여백 추가: 경계 근처 타겟이 반대편 구간 가격을 참조하는 것을 완전 차단
-    raw_train_indices = total_valid_indices[
-        total_valid_indices < _bull_end_pos - horizon
-    ]
-    raw_val_indices   = total_valid_indices[
-        (total_valid_indices >= _bull_end_pos + seq_length + horizon) &
-        (total_valid_indices <  _val_end_pos - horizon)
-    ]
-    raw_test_indices  = total_valid_indices[
-        total_valid_indices >= _val_end_pos + seq_length + horizon
-    ]
+    if long_split and expert_type == 'long':
+        _long_train_end_pos = int((_dt <= LONG_TRAIN_END).sum())
+        _long_val_end_pos   = int((_dt <= LONG_VAL_END).sum())
+        print(
+            f"[Long 전용 분할] train: ~{LONG_TRAIN_END.date()} ({_long_train_end_pos} rows), "
+            f"val: ~{LONG_VAL_END.date()} ({_long_val_end_pos - _long_train_end_pos} rows)"
+        )
+        raw_train_indices = total_valid_indices[
+            total_valid_indices < _long_train_end_pos - horizon
+        ]
+        raw_val_indices   = total_valid_indices[
+            (total_valid_indices >= _long_train_end_pos + seq_length + horizon) &
+            (total_valid_indices <  _long_val_end_pos - horizon)
+        ]
+        raw_test_indices  = total_valid_indices[
+            total_valid_indices >= _val_end_pos + seq_length + horizon
+        ]
+    else:
+        raw_train_indices = total_valid_indices[
+            total_valid_indices < _bull_end_pos - horizon
+        ]
+        raw_val_indices   = total_valid_indices[
+            (total_valid_indices >= _bull_end_pos + seq_length + horizon) &
+            (total_valid_indices <  _val_end_pos - horizon)
+        ]
+        raw_test_indices  = total_valid_indices[
+            total_valid_indices >= _val_end_pos + seq_length + horizon
+        ]
 
     # 언더샘플링 헬퍼: 강제 1:1 제거 → 최대 1:_MAX_NEG_RATIO 비율로 제한
     # BCEWithLogitsLoss pos_weight 와 동일 비율을 사용해 이중 보정을 방지합니다.
